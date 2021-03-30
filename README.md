@@ -5,14 +5,14 @@ This repo will contain various libraries I've created for my personal use.
 
 Currently, this only contains an Address Conversion tool which is similar in use to LunarAddress, except I don't support ZSNES save states. (I could, but would rather not.)
 
-###Supported Address Mapping Conversions:
+### Supported Address Mapping Conversions:
 * LoROM (Type 1/2)
 * HiROM
 * ExLoROM
 * ExHiROM
 * PC/Binary
 
-###Basic Usage:
+### Basic Usage:
 ```python
 from snes import SFCAddressConvert, SFCAddressType
 converter = SFCAddressConvert(0x5f800, SFCAddressType.PC)
@@ -32,7 +32,7 @@ print(converter.exhirom_address)
 0xC5F800
 ```
 
-##Short Explainer
+## Short Explainer
 There are several helper methods that can be used for converting SNES/SFC addresses. Essentially, this library can be combined with any number of other tools such as script dumping, pointer table generation, address conversions built in to hex editors, etc.
 
 I plan on adding more tools as I need it, but in the meantime, hopefully somebody can make use of this.
