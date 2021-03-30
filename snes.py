@@ -428,6 +428,7 @@ class SFCAddressConvert:
 def lorom_to_hirom(in_data: list):
     """
     Converts a full binary rom file (list of bytes) from lorom to hirom format (doubles every bank)
+    Quick and dirty.
     :param in_data: the original data
     :return: the hirom data
     """
