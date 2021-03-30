@@ -108,6 +108,9 @@ class SFCPointer:
     def bank(self, value):
         self.__full_pointer[2] = self.integer_or_hex(value)
 
+    def to_conv(self, addr_type):
+        return SFCAddressConvert(self.full_address, addr_type)
+
     @staticmethod
     def __check_list_tuple(value):
         if not (type(value) is list or type(value) is tuple):
@@ -186,7 +189,8 @@ class SFCAddressConvert:
             self.__address = self.exlorom_to_pc(address)
         else:
             raise ValueError('`address_type` parameter is invalid!')
-        print(self)
+        if verbose:
+            print(self)
 
     def __str__(self):
         hirom = self.hirom_address
@@ -280,7 +284,7 @@ class SFCAddressConvert:
     @staticmethod
     @lru_cache(0xFFFFFF)
     def bank_byte(addr: int):
-        return int(addr / 0x8000) & 0xFF
+        return int(addr / 0x10000) & 0xFF
 
     @property
     @lru_cache(0xFFFFFF)
@@ -363,7 +367,7 @@ class SFCAddressConvert:
         snes_addr = pc_addr
         if pc_addr < 0x400000:
             snes_addr |= 0xC00000
-        if pc_addr >= 0x7E0000:
+        elif pc_addr >= 0x7E0000:
             snes_addr -= 0x400000
 
         return snes_addr
@@ -423,6 +427,45 @@ class SFCAddressConvert:
             pc_addr += 0x400000
 
         return pc_addr
+
+
+def get_pointers():
+    data_file = open("2015.sfc", "rb")
+    bin = list(data_file.read())
+    pointer_extract(bin, 0x1B0000, 0x400)
+
+
+def pointer_extract(bin_list: list, ptr_tbl_loc: int, ptr_tbl_len: int = None, ptr_bytes: int = 2, ptr_bank: int = None,
+                    output_folder: str = './'):
+    if not ptr_tbl_len:
+        ptr_tbl_len = 0x1000
+    if not ptr_bank:
+        ptl = SFCPointer(ptr_tbl_loc)
+        ptr_bank = ptl.bank
+
+    for i in range(ptr_tbl_loc, ptr_tbl_loc + ptr_tbl_len, ptr_bytes):
+        ptr_end = i + ptr_bytes
+        actual_ptr = bin_list[i: ptr_end]
+        ptr = SFCPointer(actual_ptr[0], actual_ptr[1], bank=ptr_bank)
+        next_ptr_data = bin_list[ptr_end: ptr_end + ptr_bytes]
+        next_ptr = SFCPointer(next_ptr_data[0], next_ptr_data[1], bank=ptr_bank) \
+            if (ptr_end + ptr_bytes) < (ptr_tbl_loc + ptr_tbl_len) else None
+        lr_ptr = ptr.to_conv(SFCAddressType.LOROM1)
+        lr_ptr2 = next_ptr.to_conv(SFCAddressType.LOROM1) if next_ptr else None
+        data_start = lr_ptr.to_pointer()  # TODO: This is converting incorrectly... FIXME
+        data_start.bank = ptr_bank
+        data_start = data_start.full_address
+        data_end = None
+        if lr_ptr2:
+            data_end = lr_ptr2.to_pointer()
+            data_end.bank = ptr_bank
+            data_end = data_end.full_address
+        data_end = data_end if data_end else data_start + 0x30
+        data = bin_list[data_start: data_end]
+        if data:
+            ptr_file = open(f"{ptr.full_hex}.bin", "wb")
+            ptr_file.write(bytearray(data))
+            ptr_file.close()
 
 
 def lorom_to_hirom(in_data: list):
