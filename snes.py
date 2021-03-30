@@ -6,6 +6,125 @@ by DackR
 """
 
 
+class SFCPointer:
+    def __init__(self, low=None, high=None, bank=None):
+        """
+        Pointers can be defined, modified, and read in many ways.
+        :param low: can be as small as 8 bit, as big as 24 bit (over 24 bit is ignored)
+        :param high: can be 8 to 16 bit (over 16 bit is ignored)
+        :param bank: only be 8 bit (extra data is lost)
+        """
+        self.__full_pointer = [0x0, 0x0, 0x0]
+        if low:
+            low = self.integer_or_hex(low)
+            if low > 0xFFFF and not (high and bank):
+                bank = SFCAddressConvert.bank_byte(low)
+                high = SFCAddressConvert.high_byte(low)
+                low = SFCAddressConvert.low_byte(low)
+            elif low > 0xFF and not high:
+                high = SFCAddressConvert.high_byte(low)
+                low = SFCAddressConvert.low_byte(low)
+            self.low = low
+        if high:
+            high = self.integer_or_hex(high)
+            if high > 0xFF and not bank:
+                bank = SFCAddressConvert.high_byte(high)
+                high = SFCAddressConvert.low_byte(high)
+            self.high = high
+        if bank:
+            self.bank = self.integer_or_hex(bank)
+
+    def __str__(self):
+        return self.hex_fmt(self.full_address, 6) if self.full_address > 0xFFFF else self.hex_fmt(self.short_address, 4)
+
+    def __repr__(self):
+        return str(self)
+
+    @staticmethod
+    def hex_fmt(value, pad=4, prefix='0x'):
+        return f'{prefix}{value:0{pad}X}'
+
+    @property
+    def full_address(self):
+        return (self.__full_pointer[0]) + (self.__full_pointer[1] * 0x100) + (self.__full_pointer[2] * 0x10000)
+
+    @property
+    def short_address(self):
+        return (self.__full_pointer[0]) + (self.__full_pointer[1] * 0x100)
+
+    @property
+    def short(self):
+        return self.__full_pointer[:2]
+
+    @short.setter
+    def short(self, value):
+        self.__full_pointer = [0x0, 0x0, 0x0]
+        self.__check_list_tuple(value)
+        self.__set_ptr_pos(0, value)
+        self.__set_ptr_pos(1, value)
+
+    @property
+    def full(self):
+        return self.__full_pointer
+
+    @full.setter
+    def full(self, value):
+        self.__full_pointer = [0x0, 0x0, 0x0]
+        self.__check_list_tuple(value)
+        self.__set_ptr_pos(0, value)
+        self.__set_ptr_pos(1, value)
+        self.__set_ptr_pos(2, value)
+
+    @property
+    def low(self):
+        return self.__full_pointer[0]
+
+    @low.setter
+    def low(self, value):
+        self.__full_pointer[0] = self.integer_or_hex(value)
+
+    @property
+    def high(self):
+        return self.__full_pointer[1]
+
+    @high.setter
+    def high(self, value):
+        self.__full_pointer[1] = self.integer_or_hex(value)
+
+    @property
+    def bank(self):
+        return self.__full_pointer[2]
+
+    @bank.setter
+    def bank(self, value):
+        self.__full_pointer[2] = self.integer_or_hex(value)
+
+    @staticmethod
+    def __check_list_tuple(value):
+        if not (type(value) is list or type(value) is tuple):
+            raise ValueError("Cannot assign any value but type of list or tuple.")
+        if not len(value) >= 1:
+            raise ValueError("List/Tuple length must be at least 1.")
+
+    def __set_ptr_pos(self, index, input_val):
+        if len(input_val) > index:
+            input_val[index] = self.integer_or_hex(input_val[index])
+            self.__full_pointer[index] = input_val[index]
+
+    @staticmethod
+    def integer_or_hex(value):
+        if type(value) is str:
+            if value.upper().startswith('0X'):
+                value = value.replace('0X', '')
+            try:
+                value = int(value, 16)
+            except ValueError as ex:
+                raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
+        elif type(value) is not int:
+            raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
+        return value & 0xFF
+
+
 class SFCAddressType:
     PC = 0
     LOROM1 = 1
@@ -18,6 +137,17 @@ class SFCAddressType:
 class SFCAddressConvert:
     def __init__(self, address: Union[int, str], address_type: SFCAddressType = SFCAddressType.PC, default_value='N/A',
                  hex_prefix='0x', decimal: bool = False, header: bool = False, verbose=False, lorom_fallback=False):
+        """
+        Class can be instantiated in case multiple conversions are desired.
+        :param address: integer/hexadecimal address value
+        :param address_type: the input address type-- defaults to PC
+        :param default_value: the value that is shown while printing values if the conversion failed
+        :param hex_prefix: this string is prepended to the output hex value-- defaults to 0x (ex: 0x0BC018)
+        :param decimal: boolean value to indicate the default conversion output value-- defaults to False
+        :param header: indicate whether the conversion should take a copier header into account-- default False
+        :param verbose: if more console output is desired-- default False
+        :param lorom_fallback: if LoROM 1/2 conversion fails, they will fall back to the other type
+        """
         self.__header = header
         self.__prefix = hex_prefix
         self.__show_hex = not decimal
@@ -25,15 +155,7 @@ class SFCAddressConvert:
         self.__verbose = verbose
         self.__lorom_fallback = lorom_fallback
 
-        if type(address) is str:
-            if address.upper().startswith('0X'):
-                address = address.replace('0X', '')
-            try:
-                address = int(address, 16)
-            except ValueError as ex:
-                raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
-        elif type(address) is not int:
-            raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
+        address = SFCPointer.integer_or_hex(address)
 
         if address_type == SFCAddressType.PC:
             self.__address = address if not header else header - 512
@@ -106,6 +228,11 @@ class SFCAddressConvert:
             addr = self.pc_to_exlorom(self.__address)
         return addr
 
+    def to_pointer(self, addr=None):
+        if addr is None:
+            addr = self.__address
+        return SFCPointer(addr)
+
     @lru_cache(0xFFFFFF)
     def get_address_bytes(self, address_type: Optional[SFCAddressType] = None) -> list:
         return [self.get_low_byte(address_type), self.get_high_byte(address_type), self.get_bank_byte(address_type)]
@@ -113,16 +240,31 @@ class SFCAddressConvert:
     @lru_cache(0xFFFFFF)
     def get_low_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
         addr = self.get_address(address_type)
+        return self.low_byte(addr)
+
+    @staticmethod
+    @lru_cache(0xFFFFFF)
+    def low_byte(addr: int):
         return addr & 0xFF
 
     @lru_cache(0xFFFFFF)
     def get_high_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
         addr = self.get_address(address_type)
-        return (int(addr / 0x100) & 0x7F) + 0x80
+        return self.high_byte(addr)
+
+    @staticmethod
+    @lru_cache(0xFFFFFF)
+    def high_byte(addr: int):
+        return int(addr / 0x100) & 0xFF
 
     @lru_cache(0xFFFFFF)
     def get_bank_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
         addr = self.get_address(address_type)
+        return self.bank_byte(addr)
+
+    @staticmethod
+    @lru_cache(0xFFFFFF)
+    def bank_byte(addr: int):
         return int(addr / 0x8000) & 0xFF
 
     @property
@@ -217,7 +359,7 @@ class SFCAddressConvert:
         if not (0x8000 <= snes_addr <= 0x6FFFFF):
             if verbose:
                 print("Not a valid LoROM1 address!")
-            return cls.lorom2_to_pc(snes_addr) if fallback else None
+            return cls.lorom2_to_pc(snes_addr, verbose) if fallback else None
 
         return snes_addr & 0x7FFF | ((snes_addr & 0x7F0000) >> 1)
 
@@ -227,7 +369,7 @@ class SFCAddressConvert:
         if not (0x808000 <= snes_addr <= 0xFFFFFF):
             if verbose:
                 print("Not a valid LoROM2 address!")
-            return cls.lorom1_to_pc(snes_addr) if fallback else None
+            return cls.lorom1_to_pc(snes_addr, verbose) if fallback else None
 
         return snes_addr & 0x7FFF | ((snes_addr & 0x7F0000) >> 1)
 
