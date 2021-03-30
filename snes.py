@@ -17,7 +17,7 @@ class SFCPointer:
         """
         self.__full_pointer = [0x0, 0x0, 0x0]
         if low:
-            low = self.integer_or_hex(low)
+            low = self.integer_or_hex(low, 0xFFFFFF)
             if low > 0xFFFF and not (high and bank):
                 bank = SFCAddressConvert.bank_byte(low)
                 high = SFCAddressConvert.high_byte(low)
@@ -27,7 +27,7 @@ class SFCPointer:
                 low = SFCAddressConvert.low_byte(low)
             self.low = low
         if high:
-            high = self.integer_or_hex(high)
+            high = self.integer_or_hex(high, 0xFFFF)
             if high > 0xFF and not bank:
                 bank = SFCAddressConvert.high_byte(high)
                 high = SFCAddressConvert.low_byte(high)
@@ -50,8 +50,16 @@ class SFCPointer:
         return (self.__full_pointer[0]) + (self.__full_pointer[1] * 0x100) + (self.__full_pointer[2] * 0x10000)
 
     @property
+    def full_hex(self):
+        return self.hex_fmt(self.full_address, 6)
+
+    @property
     def short_address(self):
         return (self.__full_pointer[0]) + (self.__full_pointer[1] * 0x100)
+
+    @property
+    def short_hex(self):
+        return self.hex_fmt(self.short_address)
 
     @property
     def short(self):
