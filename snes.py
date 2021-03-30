@@ -425,6 +425,26 @@ class SFCAddressConvert:
         return pc_addr
 
 
+def lorom_to_hirom(in_data: list):
+    """
+    Converts a full binary rom file (list of bytes) from lorom to hirom format (doubles every bank)
+    :param in_data: the original data
+    :return: the hirom data
+    """
+    final_data = [0xFF] * (len(in_data) * 2)
+
+    div = 0x8000
+    pcs = int(len(in_data) / div)
+
+    for c in range(0, pcs):
+        for d in range(0, div):
+            pc_pos = d + (c * div)
+            hirom_pos = d + (c * 0x10000)
+            final_data[hirom_pos] = 0xFF if c == 0 else in_data[pc_pos]
+            final_data[hirom_pos + div] = in_data[pc_pos]
+    return final_data
+
+
 def run_test(function1, function2, i, name, verbose_progress, **kwargs):
     addr = function1(i)
     conv = function2(addr, **kwargs) if addr else 0
