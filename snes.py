@@ -10,6 +10,7 @@ class SFCPointer:
     def __init__(self, low=None, high=None, bank=None):
         """
         Pointers can be defined, modified, and read in many ways.
+        low and high values can be used to fill part of, or the entire address, depending on what is desired
         :param low: can be as small as 8 bit, as big as 24 bit (over 24 bit is ignored)
         :param high: can be 8 to 16 bit (over 16 bit is ignored)
         :param bank: only be 8 bit (extra data is lost)
@@ -112,7 +113,13 @@ class SFCPointer:
             self.__full_pointer[index] = input_val[index]
 
     @staticmethod
-    def integer_or_hex(value):
+    def integer_or_hex(value: Union[int, str], mask: int = 0xFF) -> int:
+        """
+        validation for input values, also applies masking to the value
+        :param value:
+        :param mask: value is logical and'ed to the mask
+        :return: normalized, and masked integer
+        """
         if type(value) is str:
             if value.upper().startswith('0X'):
                 value = value.replace('0X', '')
@@ -122,7 +129,7 @@ class SFCPointer:
                 raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
         elif type(value) is not int:
             raise ValueError('`address` parameter must be an integer or a hexadecimal string!')
-        return value & 0xFF
+        return value & mask
 
 
 class SFCAddressType:
@@ -155,7 +162,7 @@ class SFCAddressConvert:
         self.__verbose = verbose
         self.__lorom_fallback = lorom_fallback
 
-        address = SFCPointer.integer_or_hex(address)
+        address = SFCPointer.integer_or_hex(address, 0xFFFFFF)
 
         if address_type == SFCAddressType.PC:
             self.__address = address if not header else header - 512
