@@ -13,11 +13,13 @@ Currently, this only contains an Address Conversion tool, and a Pointer class wh
 * PC/Binary
 
 ### Basic Usage:
+
 ```python
-from snes import SFCAddressConvert, SFCAddressType
-converter = SFCAddressConvert(0x5f800, SFCAddressType.PC)
-str(converter)
-print(converter.exhirom_address)
+from snes import SFCAddress, SFCAddressType
+
+addr = SFCAddress(0x5f800, SFCAddressType.PC)
+print(addr.all())  # all applicable conversions are shown
+print(addr.exhirom_address)  # hex-formatted EXHIROM address
 ```
 ```text
 =====TYPE====:=ADDRESS=
@@ -26,20 +28,6 @@ print(converter.exhirom_address)
 **(2/Ex)LoROM: 0x8BF800
 *****Ex/HiROM: 0xC5F800
 '0xC5F800'
-```
-```python
-from snes import SFCPointer
-ptr_obj = SFCPointer(0x5f800)
-print(ptr_obj)
-print(ptr_obj.short_hex)
-print(ptr_obj.short_address)
-print(ptr_obj.full_address)
-```
-```text
-'0x0BF800'
-'0xF800'
-63488
-784384
 ```
 
 ## Short Explainer

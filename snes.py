@@ -16,30 +16,39 @@ class SFCPointer:
         :param bank: only be 8 bit (extra data is lost)
         """
         self.__full_pointer = [0x0, 0x0, 0x0]
-        if low:
-            low = self.integer_or_hex(low, 0xFFFFFF)
-            if low > 0xFFFF and not (high and bank):
-                bank = SFCAddressConvert.bank_byte(low)
-                high = SFCAddressConvert.high_byte(low)
-                low = SFCAddressConvert.low_byte(low)
-            elif low > 0xFF and not high:
-                high = SFCAddressConvert.high_byte(low)
-                low = SFCAddressConvert.low_byte(low)
-            self.low = low
-        if high:
-            high = self.integer_or_hex(high, 0xFFFF)
-            if high > 0xFF and not bank:
-                bank = SFCAddressConvert.high_byte(high)
-                high = SFCAddressConvert.low_byte(high)
-            self.high = high
-        if bank:
-            self.bank = self.integer_or_hex(bank)
+        valid = self.validate_bytes(low, high, bank)
+        self.__set_ptr_pos(0, valid)
+        self.__set_ptr_pos(1, valid)
+        self.__set_ptr_pos(2, valid)
 
     def __str__(self):
         return self.hex_fmt(self.full_address, 6) if self.full_address > 0xFFFF else self.hex_fmt(self.short_address, 4)
 
     def __repr__(self):
         return str(self)
+
+    @classmethod
+    def validate_bytes(cls, *args):
+        low = args[0] if len(args) > 0 else 0x0
+        high = args[1] if len(args) > 1 else 0x0
+        bank = args[2] if len(args) > 2 else 0x0
+        if low:
+            low = cls.integer_or_hex(low, 0xFFFFFF)
+            if low > 0xFFFF and not (high and bank):
+                bank = SFCAddress.bank_byte(low)
+                high = SFCAddress.high_byte(low)
+                low = SFCAddress.low_byte(low)
+            elif low > 0xFF and not high:
+                high = SFCAddress.high_byte(low)
+                low = SFCAddress.low_byte(low)
+        if high:
+            high = cls.integer_or_hex(high, 0xFFFF)
+            if high > 0xFF and not bank:
+                bank = SFCAddress.high_byte(high)
+                high = SFCAddress.low_byte(high)
+        if bank:
+            bank = cls.integer_or_hex(bank)
+        return low, high, bank
 
     @staticmethod
     def hex_fmt(value, pad=4, prefix='0x'):
@@ -108,8 +117,8 @@ class SFCPointer:
     def bank(self, value):
         self.__full_pointer[2] = self.integer_or_hex(value)
 
-    def to_conv(self, addr_type):
-        return SFCAddressConvert(self.full_address, addr_type)
+    def to_addr(self, addr_type):
+        return SFCAddress(self.full_address, addr_type)
 
     @staticmethod
     def __check_list_tuple(value):
@@ -120,8 +129,7 @@ class SFCPointer:
 
     def __set_ptr_pos(self, index, input_val):
         if len(input_val) > index:
-            input_val[index] = self.integer_or_hex(input_val[index])
-            self.__full_pointer[index] = input_val[index]
+            self.__full_pointer[index] = self.integer_or_hex(input_val[index])
 
     @staticmethod
     def integer_or_hex(value: Union[int, str], mask: int = 0xFF) -> int:
@@ -152,9 +160,10 @@ class SFCAddressType:
     EXLOROM = 5
 
 
-class SFCAddressConvert:
-    def __init__(self, address: Union[int, str], address_type: SFCAddressType = SFCAddressType.PC, default_value='N/A',
-                 hex_prefix='0x', decimal: bool = False, header: bool = False, verbose=False, lorom_fallback=False):
+class SFCAddress:
+    def __init__(self, address: Union[int, str, list, tuple], address_type: int = SFCAddressType.PC,
+                 default_value='N/A', hex_prefix='0x', decimal: bool = False, header: bool = False,
+                 verbose=False, lorom_fallback=False):
         """
         Class can be instantiated in case multiple conversions are desired.
         :param address: integer/hexadecimal address value
@@ -172,8 +181,13 @@ class SFCAddressConvert:
         self.__default = default_value
         self.__verbose = verbose
         self.__lorom_fallback = lorom_fallback
+        self.__initial_type = address_type
 
-        address = SFCPointer.integer_or_hex(address, 0xFFFFFF)
+        if type(address) is not list and type(address) is not tuple:
+            address = SFCPointer.integer_or_hex(address, 0xFFFFFF)
+        else:
+            ptr = SFCPointer(*address)
+            address = ptr.full_address
 
         if address_type == SFCAddressType.PC:
             self.__address = address if not header else header - 512
@@ -190,9 +204,9 @@ class SFCAddressConvert:
         else:
             raise ValueError('`address_type` parameter is invalid!')
         if verbose:
-            print(self)
+            print(self.all())
 
-    def __str__(self):
+    def all(self):
         hirom = self.hirom_address
         exhirom = self.exhirom_address
         lorom = self.lorom1_address
@@ -214,6 +228,9 @@ class SFCAddressConvert:
 
         return my_repr
 
+    def __str__(self):
+        return self.display_address(self.get_address(self.__initial_type))
+
     def __repr__(self):
         return f"{self.pc_address}({self.__address})"
 
@@ -231,9 +248,12 @@ class SFCAddressConvert:
         return self.__default
 
     @lru_cache(0xFFFFFF)
-    def get_address(self, address_type: Optional[SFCAddressType]) -> int:
+    def get_address(self, address_type: Optional[int] = None) -> int:
         addr = 0
-        if not address_type or address_type == SFCAddressType.PC:
+        if address_type is None:
+            address_type = self.__initial_type
+
+        if address_type == SFCAddressType.PC:
             addr = self.__address
         elif address_type == SFCAddressType.LOROM1:
             addr = self.pc_to_lorom1(self.__address)
@@ -257,7 +277,7 @@ class SFCAddressConvert:
         return [self.get_low_byte(address_type), self.get_high_byte(address_type), self.get_bank_byte(address_type)]
 
     @lru_cache(0xFFFFFF)
-    def get_low_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
+    def get_low_byte(self, address_type: Optional[int] = None) -> int:
         addr = self.get_address(address_type)
         return self.low_byte(addr)
 
@@ -267,7 +287,7 @@ class SFCAddressConvert:
         return addr & 0xFF
 
     @lru_cache(0xFFFFFF)
-    def get_high_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
+    def get_high_byte(self, address_type: Optional[int] = None) -> int:
         addr = self.get_address(address_type)
         return self.high_byte(addr)
 
@@ -277,7 +297,7 @@ class SFCAddressConvert:
         return int(addr / 0x100) & 0xFF
 
     @lru_cache(0xFFFFFF)
-    def get_bank_byte(self, address_type: Optional[SFCAddressType] = None) -> int:
+    def get_bank_byte(self, address_type: Optional[int] = None) -> int:
         addr = self.get_address(address_type)
         return self.bank_byte(addr)
 
@@ -429,45 +449,6 @@ class SFCAddressConvert:
         return pc_addr
 
 
-def get_pointers():
-    data_file = open("2015.sfc", "rb")
-    bin = list(data_file.read())
-    pointer_extract(bin, 0x1B0000, 0x400)
-
-
-def pointer_extract(bin_list: list, ptr_tbl_loc: int, ptr_tbl_len: int = None, ptr_bytes: int = 2, ptr_bank: int = None,
-                    output_folder: str = './'):
-    if not ptr_tbl_len:
-        ptr_tbl_len = 0x1000
-    if not ptr_bank:
-        ptl = SFCPointer(ptr_tbl_loc)
-        ptr_bank = ptl.bank
-
-    for i in range(ptr_tbl_loc, ptr_tbl_loc + ptr_tbl_len, ptr_bytes):
-        ptr_end = i + ptr_bytes
-        actual_ptr = bin_list[i: ptr_end]
-        ptr = SFCPointer(actual_ptr[0], actual_ptr[1], bank=ptr_bank)
-        next_ptr_data = bin_list[ptr_end: ptr_end + ptr_bytes]
-        next_ptr = SFCPointer(next_ptr_data[0], next_ptr_data[1], bank=ptr_bank) \
-            if (ptr_end + ptr_bytes) < (ptr_tbl_loc + ptr_tbl_len) else None
-        lr_ptr = ptr.to_conv(SFCAddressType.LOROM1)
-        lr_ptr2 = next_ptr.to_conv(SFCAddressType.LOROM1) if next_ptr else None
-        data_start = lr_ptr.to_pointer()  # TODO: This is converting incorrectly... FIXME
-        data_start.bank = ptr_bank
-        data_start = data_start.full_address
-        data_end = None
-        if lr_ptr2:
-            data_end = lr_ptr2.to_pointer()
-            data_end.bank = ptr_bank
-            data_end = data_end.full_address
-        data_end = data_end if data_end else data_start + 0x30
-        data = bin_list[data_start: data_end]
-        if data:
-            ptr_file = open(f"{ptr.full_hex}.bin", "wb")
-            ptr_file.write(bytearray(data))
-            ptr_file.close()
-
-
 def lorom_to_hirom(in_data: list):
     """
     Converts a full binary rom file (list of bytes) from lorom to hirom format (doubles every bank)
@@ -505,20 +486,20 @@ def test_conv(start=0, end=0x7FFFFF, step=0x8000, verbose=True, stop_on_failure=
     fail_count = 0
     lorom1_kwargs = lorom1_kwargs if lorom1_kwargs else {'fallback': True, 'verbose': True}
     for i in range(start, end, step):
-        if not run_test(SFCAddressConvert.pc_to_lorom1, SFCAddressConvert.lorom1_to_pc, i, "LOROM1", verbose,
+        if not run_test(SFCAddress.pc_to_lorom1, SFCAddress.lorom1_to_pc, i, "LOROM1", verbose,
                         **lorom1_kwargs):
             fail_count += 1
 
-        if not run_test(SFCAddressConvert.pc_to_lorom2, SFCAddressConvert.lorom2_to_pc, i, "LOROM2", verbose):
+        if not run_test(SFCAddress.pc_to_lorom2, SFCAddress.lorom2_to_pc, i, "LOROM2", verbose):
             fail_count += 1
 
-        if not run_test(SFCAddressConvert.pc_to_hirom, SFCAddressConvert.hirom_to_pc, i, "HIROM", verbose):
+        if not run_test(SFCAddress.pc_to_hirom, SFCAddress.hirom_to_pc, i, "HIROM", verbose):
             fail_count += 1
 
-        if not run_test(SFCAddressConvert.pc_to_exlorom, SFCAddressConvert.exlorom_to_pc, i, "EXLOROM", verbose):
+        if not run_test(SFCAddress.pc_to_exlorom, SFCAddress.exlorom_to_pc, i, "EXLOROM", verbose):
             fail_count += 1
 
-        if not run_test(SFCAddressConvert.pc_to_exhirom, SFCAddressConvert.exhirom_to_pc, i, "EXHIROM", verbose):
+        if not run_test(SFCAddress.pc_to_exhirom, SFCAddress.exhirom_to_pc, i, "EXHIROM", verbose):
             fail_count += 1
 
         if stop_on_failure and fail_count > 0:
