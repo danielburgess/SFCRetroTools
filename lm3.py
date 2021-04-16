@@ -3,12 +3,22 @@ from script import Table
 
 """
 Little Master 3
+TODO: Find more pointer locations.
+      Work on script. Work on font.
+      VWF?
 """
 
 
 def extract_script_bins(file_name='2015.sfc', folder_prefix='en_old'):
     folder_name = f'{folder_prefix}_ptr_data'
     table_filename = 'jap.tbl'
+
+    # 0x1456B - Unit Attribute Value Pointer (0x3 length) - 2 byte height, weight, 1 byte age
+    # 0x1457F - Unit Weapon Name Pointer - Preceeding byte is entry length
+    # 0x14588 - Unit Armor Name Pointer - Preceeding byte is entry length
+
+    # unit and terrain descriptions
+    extract_pointer_data(file_name, 0x30000, 0x500, 'unit-terrain-desc', folder_name, table=table_filename)
 
     # main script data
     extract_pointer_data(file_name, 0x1B0000, 0x400, 'script', folder_name, table=table_filename)
@@ -24,8 +34,8 @@ def extract_script_bins(file_name='2015.sfc', folder_prefix='en_old'):
                                     False, table=table_filename)
     extract_pointer_data(file_name, 0x1B1000, 0x6A, 'unit-attacks', folder_name, atk_data, table=table_filename)
 
-    # unit and terrain descriptions
-    extract_pointer_data(file_name, 0x30000, 0x500, 'unit-terrain-desc', folder_name, table=table_filename)
+    # Scenario descriptions
+    extract_pointer_data(file_name, 0x111EE3, 0x13C, 'scenario-desc', folder_name, table=table_filename)
 
 
 def extract_pointer_data(input_filename: str, ptr_tbl_pos: int, tbl_len: int, table_name: str, out_folder='out',
@@ -50,15 +60,17 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
     tbl = Table(table) if table else None
 
     try:
-        os.mkdir(out_folder)
-        print(f'Info: Created output folder. "{out_folder}"')
+        if not os.path.isdir(out_folder):
+            os.mkdir(out_folder)
+            print(f'Info: Created output folder. "{out_folder}"')
     except OSError as error:
         print(f'Warning: Cannot create output folder. "{out_folder}"')
 
     table_folder = f'{out_folder}/{table_name}'
     try:
-        os.mkdir(table_folder)
-        print(f'Info: Created output folder. "{table_folder}"')
+        if not os.path.isdir(table_folder):
+            os.mkdir(table_folder)
+            print(f'Info: Created output folder. "{table_folder}"')
     except OSError as error:
         print(f'Warning: Cannot create output folder. "{table_folder}"')
 
@@ -114,6 +126,7 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
         write_csv(table_folder, pointer_list)
         if table:  # if we get a table, output the text representation
             write_script(f'./{out_folder}/{table_name}.txt', bin_list, tbl)
+            print(f'Saved {hex(ptr_index)}({ptr_index}) blocks of data from table: {table_name}.')
 
     ptr_data['bin_list'] = bin_list
     ptr_data['ptr_list'] = pointer_list
@@ -121,10 +134,13 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
 
 
 def write_script(filename: str, dict_data: list, tbl: Table):
+    line1 = True
+    nl = "\n"
     with open(filename, 'w', encoding=tbl.encoding) as of:
         for data in dict_data:
-            of.write(f"\n<<${data['id']}>>\n")
+            of.write(f"{'' if line1 else nl}<<${data['id']}>>{nl}")
             of.write(tbl.interpret_binary_data(data['data']))
+            line1 = False
 
 
 def write_csv(filename, dict_data: list):

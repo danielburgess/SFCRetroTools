@@ -387,8 +387,8 @@ class SFCAddress:
         snes_addr = pc_addr
         if pc_addr < 0x400000:
             snes_addr |= 0xC00000
-        elif pc_addr >= 0x7E0000:
-            snes_addr -= 0x400000
+        # elif pc_addr >= 0x7E0000:
+        #     snes_addr -= 0x400000
 
         return snes_addr
 
