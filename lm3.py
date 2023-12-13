@@ -45,13 +45,26 @@ def extract_pointer_data(input_filename: str, ptr_tbl_pos: int, tbl_len: int, ta
     return pointer_extract(table_name, out_folder, bin_data, ptr_tbl_pos, tbl_len,
                            ptr_data=ptr_data, output=output, table=table)
 
+@staticmethod
+def create_folder_if_not_exists(folder_path):
+    import os
+    try:
+        if not os.path.isdir(folder_path):
+            os.mkdir(folder_path)
+            print(f'Info: Created folder. "{folder_path}"')
+    except OSError as error:
+        print(f'Warning: Cannot create folder. "{folder_path}"')
+
 
 def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_loc: int, ptr_tbl_len: int = None,
                     ptr_bytes: int = 2, ptr_bank: int = None, ptr_data: dict = None, output=True, table: str = None):
-    import os
+
+    # if None or 0 is given, we will default
     if not ptr_tbl_len:
         ptr_tbl_len = 0x1000
 
+    # create a SFCAddress object.
+    # This allows us to make address mapping conversions a snap.
     ptr_table_addr = SFCAddress(ptr_tbl_loc)
     if not ptr_bank:
         ptr_bank = ptr_table_addr.get_bank_byte(SFCAddressType.LOROM1)
@@ -59,20 +72,10 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
         ptr_data = {}
     tbl = Table(table) if table else None
 
-    try:
-        if not os.path.isdir(out_folder):
-            os.mkdir(out_folder)
-            print(f'Info: Created output folder. "{out_folder}"')
-    except OSError as error:
-        print(f'Warning: Cannot create output folder. "{out_folder}"')
+    create_folder_if_not_exists(out_folder)
 
     table_folder = f'{out_folder}/{table_name}'
-    try:
-        if not os.path.isdir(table_folder):
-            os.mkdir(table_folder)
-            print(f'Info: Created output folder. "{table_folder}"')
-    except OSError as error:
-        print(f'Warning: Cannot create output folder. "{table_folder}"')
+    create_folder_if_not_exists(table_folder)
 
     pointer_list = ptr_data['ptr_list'] if ptr_data else []
     bin_list = ptr_data['bin_list'] if ptr_data else []
@@ -133,9 +136,8 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
     return ptr_data
 
 
-def write_script(filename: str, dict_data: list, tbl: Table):
+def write_script(filename: str, dict_data: list, tbl: Table, nl: str = "\n"):
     line1 = True
-    nl = "\n"
     with open(filename, 'w', encoding=tbl.encoding) as of:
         for data in dict_data:
             of.write(f"{'' if line1 else nl}<<${data['id']}>>{nl}")

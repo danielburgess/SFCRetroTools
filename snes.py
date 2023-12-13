@@ -22,6 +22,9 @@ class SFCPointer:
         self.__set_ptr_pos(2, valid)
 
     def __str__(self):
+        """
+        return the formatted address
+        """
         return self.hex_fmt(self.full_address, 6) if self.full_address > 0xFFFF else self.hex_fmt(self.short_address, 4)
 
     def __repr__(self):
@@ -29,6 +32,12 @@ class SFCPointer:
 
     @classmethod
     def validate_bytes(cls, *args):
+        """
+        Values are passed in as positional arguments, low, high, and bank
+        low value can be the entire 24 bit address if no other args are passed in
+        high value can be the bank and high bytes if no bank byte is passed in
+        bank value can only be 8 bits and values higher are truncated
+        """
         low = args[0] if len(args) > 0 else 0x0
         high = args[1] if len(args) > 1 else 0x0
         bank = args[2] if len(args) > 2 else 0x0
@@ -52,6 +61,13 @@ class SFCPointer:
 
     @staticmethod
     def hex_fmt(value, pad=4, prefix='0x'):
+        """
+        Produce a formatted, hex value.
+        default is padded with a prefix
+        :param value: integer value to format as hex string
+        :param pad: padded up to 4 characters by default
+        :param prefix: prefix the hex string with any string -- '0x' by default
+        """
         return f'{prefix}{value:0{pad}X}'
 
     @property
@@ -207,6 +223,9 @@ class SFCAddress:
             print(self.all())
 
     def all(self):
+        """
+        Return a text representation of the current object using all possible conversions
+        """
         hirom = self.hirom_address
         exhirom = self.exhirom_address
         lorom = self.lorom1_address
@@ -284,6 +303,9 @@ class SFCAddress:
     @staticmethod
     @lru_cache(0xFFFFFF)
     def low_byte(addr: int):
+        """
+        Return a single (lowest) byte for a given address
+        """
         return addr & 0xFF
 
     @lru_cache(0xFFFFFF)

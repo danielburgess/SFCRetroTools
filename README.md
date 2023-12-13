@@ -1,9 +1,9 @@
-# RetroTool
-#### ===ROM Hacking Tools===
+# SFCRetroTools
+#### ===ROM Hacking Tools for the Super Famicom===
 
 This repo will contain various libraries I've created for my personal use.
 
-Currently, this only contains an Address Conversion tool, and a Pointer class which are used similarly to LunarAddress, except I don't support ZSNES save states. (I could, but... meh.)
+Currently, this only contains an Address Conversion tool, and a Pointer class which are used similarly to LunarAddress, except I don't support ZSNES save states. I could, but... does anyone even use ZSNES anymore?
 
 ### Supported Address Mapping Conversions:
 * LoROM (Type 1/2)
