@@ -104,6 +104,11 @@ class Table:
 
     @staticmethod
     def byte_size(value: int):
+        """
+        Get the number of bytes representing the value
+        :param value: integer value
+        :return: number of bytes
+        """
         from math import log
         if value == 0:
             return 1
@@ -118,7 +123,8 @@ class Table:
             final += '00'
         return int(final, 16)
 
-    def bytes_to_val(self, byte_list: list, reverse=False):
+    @staticmethod
+    def bytes_to_val(byte_list: list, reverse=False):
         final_val = 0
         if reverse:
             byte_list.reverse()
@@ -159,11 +165,34 @@ class Table:
         return final_string
 
     def has_char(self, bin_data):
+        """
+        Check for a valid character using all given bytes
+        :param bin_data: the list of bytes
+        :return: if there is a valid character using these bytes
+        """
+        # get the value by OR'ing and shifting the bytes together
         val = self.bytes_to_val(bin_data)
+
+        # check for valid value...
+        if len(bin_data) > 1 and val in bin_data:
+            # in the case of [00, 00] or [00, 90] or etc.
+            # the total value cannot equal a single byte value
+            return False
+
+        # using the value, check for a defined character
         char = self.get_chars(val, False)
+
         return True if char else False
 
     def check_for_lone_byte(self, bin_data, index, value=0x0):
+        """
+        Used to check for the end of a text block
+        :param bin_data: a list of values
+        :param index: current list index
+        :param value: check for this value
+        :return: if the value is found,
+        check to see if it is part of a larger value
+        """
         start1 = index - 3
         start2 = index - 2
         end0 = index + 1
@@ -184,6 +213,12 @@ class Table:
 
     @staticmethod
     def detect_encoding(file_path, lines=80):
+        """
+        Given a file, use the first X number of lines to detect the encoding
+        :param file_path: path to text file
+        :param lines: defaults to 80
+        :return: the assumed file encoding using chardet
+        """
         import chardet
         with open(file_path, 'rb') as f:
             raw_data = b''.join([f.readline() for _ in range(lines)])
