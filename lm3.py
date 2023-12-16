@@ -4,14 +4,21 @@ from script import Table
 """
 Little Master 3
 TODO: Find more pointer locations.
-      Work on script. Work on font.
+      Extract old script for comparison.
+      Work on script. 
+      Work on font.
       VWF?
 """
 
 
-def extract_script_bins(file_name='2015.sfc', folder_prefix='en_old'):
+def extract_script_bins(file_name='base.sfc', folder_prefix='en', table_filename='jap.tbl'):
     folder_name = f'{folder_prefix}_ptr_data'
-    table_filename = 'jap.tbl'
+
+    # main script data
+    extract_pointer_data(file_name, 0x1B0000, 0x400, 'script', folder_name, table=table_filename)
+
+    # Scenario descriptions
+    extract_pointer_data(file_name, 0x111EE3, 0x13C, 'scenario-desc', folder_name, table=table_filename)
 
     # 0x1456B - Unit Attribute Value Pointer (0x3 length) - 2 byte height, weight, 1 byte age
     # 0x1457F - Unit Weapon Name Pointer - Preceeding byte is entry length
@@ -20,22 +27,16 @@ def extract_script_bins(file_name='2015.sfc', folder_prefix='en_old'):
     # unit and terrain descriptions
     extract_pointer_data(file_name, 0x30000, 0x500, 'unit-terrain-desc', folder_name, table=table_filename)
 
-    # main script data
-    extract_pointer_data(file_name, 0x1B0000, 0x400, 'script', folder_name, table=table_filename)
-
-    # data for unit attacks that are re-used between the 5 unit type tables
+    # data for unit attacks that are re-used (they seem to be exact) between the 5 unit type tables
     atk_data = extract_pointer_data(file_name, 0x1B0800, 0x6A, 'unit-attacks', folder_name,
                                     output=False, table=table_filename)
     atk_data = extract_pointer_data(file_name, 0x1B0A00, 0x6A, 'unit-attacks', folder_name, atk_data,
-                                    False, table=table_filename)
+                                    output=False, table=table_filename)
     atk_data = extract_pointer_data(file_name, 0x1B0C00, 0x6A, 'unit-attacks', folder_name, atk_data,
-                                    False, table=table_filename)
+                                    output=False, table=table_filename)
     atk_data = extract_pointer_data(file_name, 0x1B0E00, 0x6A, 'unit-attacks', folder_name, atk_data,
-                                    False, table=table_filename)
+                                    output=False, table=table_filename)
     extract_pointer_data(file_name, 0x1B1000, 0x6A, 'unit-attacks', folder_name, atk_data, table=table_filename)
-
-    # Scenario descriptions
-    extract_pointer_data(file_name, 0x111EE3, 0x13C, 'scenario-desc', folder_name, table=table_filename)
 
 
 def extract_pointer_data(input_filename: str, ptr_tbl_pos: int, tbl_len: int, table_name: str, out_folder='out',
@@ -47,7 +48,29 @@ def extract_pointer_data(input_filename: str, ptr_tbl_pos: int, tbl_len: int, ta
 
 
 def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_loc: int, ptr_tbl_len: int = None,
-                    ptr_bytes: int = 2, ptr_bank: int = None, ptr_data: dict = None, output=True, table: str = None):
+                    ptr_bytes: int = 2, ptr_bank: int = None, ptr_data: dict = None, output=True, table: str = None,
+                    addr_type: int = 4):
+    """
+    Extract data from the pointer table
+    :param table_name:
+    :param out_folder:
+    :param bin_data:
+    :param ptr_tbl_loc:
+    :param ptr_tbl_len:
+    :param ptr_bytes:
+    :param ptr_bank:
+    :param ptr_data:
+    :param output: if we are dumping
+    :param table: character table class or None if only binary data
+    :param addr_type: location value to show for the text output
+    0=Table PC Address with index
+    1=Table Index Only
+    2=Pointer Address
+    3=Block Address
+    4=Combines 0 with 3
+    :return:
+    """
+
     import os
     if not ptr_tbl_len:
         ptr_tbl_len = 0x1000
@@ -105,13 +128,24 @@ def pointer_extract(table_name: str, out_folder: str, bin_data: list, ptr_tbl_lo
 
         data = bin_data[data_start: data_end]
 
-        pointer_list.append({'ptr_table_hex': ptr_table_addr.pc_address, 'ptr_table_dec': ptr_table_addr.get_address(),
+        tab_addr = ptr_table_addr.get_address()
+
+        pointer_list.append({'ptr_table_hex': ptr_table_addr.pc_address, 'ptr_table_dec': tab_addr,
                              'index': ptr_index, 'length': data_end - data_start, 'pc': ptr.pc_address,
                              'lorom': ptr.lorom1_address, 'pc_dec': data_start})
 
-        # add it to the list
+        # add it to the list using the requested address type
         if data_start not in [b['id'] for b in bin_list]:
-            bin_list.append({'id': data_start, 'data': data})
+            this_id = f'${tab_addr}:{ptr_index}'
+            if addr_type == 1:  # index only
+                this_id = ptr_index
+            elif addr_type == 2:  # the pc address of the pointer
+                this_id = f'(${i})'
+            elif addr_type == 3:  # pc address of the data block
+                this_id = f'[${data_start}]'
+            elif addr_type == 4:  # table address, index and data addr
+                this_id += f'[${data_start}]'
+            bin_list.append({'id': this_id, 'data': data})
 
         if data and len(data) > 1:  # if there was some data, spit it out
             file_name = f"./{table_folder}/{data_start}.bin"
@@ -138,7 +172,7 @@ def write_script(filename: str, dict_data: list, tbl: Table):
     nl = "\n"
     with open(filename, 'w', encoding=tbl.encoding) as of:
         for data in dict_data:
-            of.write(f"{'' if line1 else nl}<<${data['id']}>>{nl}")
+            of.write(f"{'' if line1 else nl}<<{data.get('id')}>>{nl}")
             of.write(tbl.interpret_binary_data(data['data']))
             line1 = False
 
