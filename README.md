@@ -103,6 +103,7 @@ The `SFCAddressType` class defines constants representing different Super Famico
 The `SFCAddress` class provides a flexible way to handle Super Famicom (SFC) addresses. It allows for instantiation with various input types and supports multiple conversions between different address types.
 
 ## Constructor
+
 ```python
 __init__(self, address: Union[int, str, list, tuple], address_type: int = SFCAddressType.PC,
          default_value='N/A', hex_prefix='0x', decimal: bool = False, header: bool = False,
@@ -119,6 +120,7 @@ __init__(self, address: Union[int, str, list, tuple], address_type: int = SFCAdd
 - `lorom_fallback`: If LoROM 1/2 conversion fails, it will fall back to the other type.
 
 ## Properties and Methods
+
 ### `all(self) -> str`
 Prints a formatted representation of the address in various SFC address types.
 
@@ -162,6 +164,7 @@ Returns the address in HiROM format.
 Returns the address in ExHiROM format.
 
 ## Class Methods
+
 ### `pc_to_lorom1(cls, pc_addr: int, verbose: bool = False) -> Optional[int]`
 Converts a PC address to LoROM1 format.
 
@@ -183,7 +186,7 @@ Converts a LoROM1 address to PC format.
 ### `lorom2_to_pc(cls, snes_addr: int, verbose: bool = True, fallback=False) -> Optional[int]`
 Converts a LoROM2 address to PC format.
 
-### `hirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]`
+### `hirom_to_pc(cls, snes_addr: int1, verbose: bool = False) -> Optional[int]`
 Converts a HiROM address to PC format.
 
 ### `exlorom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]`
