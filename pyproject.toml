@@ -1,5 +1,5 @@
 [project]
-name = "retrotools"
+name = "retrotool"
 version = "0.1.0"
 description = "Address Conversion Tool for the Super Famicom"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]

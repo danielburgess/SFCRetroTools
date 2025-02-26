@@ -33,8 +33,6 @@ print(addr.exhirom_address)  # hex-formatted EXHIROM address
 ## Short Explainer
 There are several helper methods that can be used for converting SNES/SFC addresses. Essentially, this library can be combined with any number of other tools such as script dumping, pointer table generation, address conversions built in to hex editors, etc.
 
-<<<<<<< HEAD
-I plan on adding more tools as I need it, but in the meantime, hopefully somebody can make use of this.
 =======
 I plan on adding more tools as I need it, but in the meantime, 
 
@@ -197,4 +195,4 @@ Converts an ExLoROM address to PC format.
 
 ### `exhirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]`
 Converts an ExHiROM address to PC format.
->>>>>>> origin/main
+
