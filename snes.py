@@ -179,7 +179,7 @@ class SFCAddressType:
 class SFCAddress:
     def __init__(self, address: Union[int, str, list, tuple], address_type: int = SFCAddressType.PC,
                  default_value='N/A', hex_prefix='0x', decimal: bool = False, header: bool = False,
-                 verbose=False, lorom_fallback=False):
+                 verbose=False, lorom_fallback=True):
         """
         Class can be instantiated in case multiple conversions are desired.
         :param address: integer/hexadecimal address value
@@ -204,6 +204,8 @@ class SFCAddress:
         else:
             ptr = SFCPointer(*address)
             address = ptr.full_address
+
+        self.__given_address = address
 
         if address_type == SFCAddressType.PC:
             self.__address = address if not header else header - 512
@@ -360,7 +362,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def pc_to_lorom1(cls, pc_addr: int) -> Optional[int]:
+    def pc_to_lorom1(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
+        if pc_addr is None:
+            if verbose:
+                print("pc_to_lorom1: Given Address is invalid.")
+            return None
         if pc_addr >= 0x400000:
             return None
 
@@ -373,7 +379,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def pc_to_lorom2(cls, pc_addr: int) -> Optional[int]:
+    def pc_to_lorom2(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
+        if pc_addr is None:
+            if verbose:
+                print("pc_to_lorom2: Given Address is invalid.")
+            return None
         if pc_addr >= 0x400000:
             return None
 
@@ -381,7 +391,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def pc_to_hirom(cls, pc_addr: int) -> Optional[int]:
+    def pc_to_hirom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
+        if pc_addr is None:
+            if verbose:
+                print("pc_to_hirom: Given Address is invalid.")
+            return None
         if pc_addr >= 0x400000:
             return None
 
@@ -389,7 +403,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def pc_to_exlorom(cls, pc_addr: int) -> Optional[int]:
+    def pc_to_exlorom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
+        if pc_addr is None:
+            if verbose:
+                print("pc_to_exlorom: Given Address is invalid.")
+            return None
         if pc_addr >= 0x7F0000:
             return None
 
@@ -402,7 +420,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def pc_to_exhirom(cls, pc_addr: int) -> Optional[int]:
+    def pc_to_exhirom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
+        if pc_addr is None:
+            if verbose:
+                print("pc_to_exhirom: Given Address is invalid.")
+            return None
         if pc_addr >= 0x7E0000:
             return None
 
@@ -417,6 +439,10 @@ class SFCAddress:
     @classmethod
     @lru_cache(0xFFFFFF)
     def lorom1_to_pc(cls, snes_addr: int, verbose: bool = True, fallback=False) -> Optional[int]:
+        if snes_addr is None:
+            if verbose:
+                print("lorom1_to_pc: Given Address is invalid.")
+            return None
         if not (0x8000 <= snes_addr <= 0x6FFFFF):
             if verbose:
                 print("Not a valid LoROM1 address!")
@@ -427,6 +453,10 @@ class SFCAddress:
     @classmethod
     @lru_cache(0xFFFFFF)
     def lorom2_to_pc(cls, snes_addr: int, verbose: bool = True, fallback=False) -> Optional[int]:
+        if snes_addr is None:
+            if verbose:
+                print("lorom2_to_pc: Given Address is invalid.")
+            return None
         if not (0x808000 <= snes_addr <= 0xFFFFFF):
             if verbose:
                 print("Not a valid LoROM2 address!")
@@ -436,7 +466,12 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def hirom_to_pc(cls, snes_addr: int) -> Optional[int]:
+    def hirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
+        if snes_addr is None:
+            if verbose:
+                print("hirom_to_pc: Given Address is invalid.")
+            return None
+
         if not (0xC00000 <= snes_addr <= 0xFFFFFF):
             print("Invalid HiROM Address!")
             return None
@@ -445,7 +480,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def exlorom_to_pc(cls, snes_addr: int) -> Optional[int]:
+    def exlorom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
+        if snes_addr is None:
+            if verbose:
+                print("exlorom_to_pc: Given Address is invalid.")
+            return None
         if not ((0x808000 <= snes_addr <= 0xFFFFFF) or (0x008000 <= snes_addr <= 0x7DFFFF)):
             print("Invalid ExLoROM Address!")
             return None
@@ -459,7 +498,11 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def exhirom_to_pc(cls, snes_addr: int) -> Optional[int]:
+    def exhirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
+        if snes_addr is None:
+            if verbose:
+                print("exhirom_to_pc: Given Address is invalid.")
+            return None
         if not ((0xC00000 <= snes_addr <= 0xFFFFFF) or (0x400000 <= snes_addr <= 0x7DFFFF)):
             print("Invalid ExHiROM Address!")
             return None
