@@ -15,7 +15,7 @@ Currently, this only contains an Address Conversion tool, and a Pointer class wh
 ### Basic Usage:
 
 ```python
-from snes import SFCAddress, SFCAddressType
+from retrotool.snes import SFCAddress, SFCAddressType
 
 addr = SFCAddress(0x5f800, SFCAddressType.PC)
 print(addr.all())  # all applicable conversions are shown
