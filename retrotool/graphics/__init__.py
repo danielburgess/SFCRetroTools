@@ -20,6 +20,13 @@ from retrotool.graphics.tilemap import (
     encode_tilemap,
     render_tilemap,
 )
+from retrotool.graphics.superfamiconv import (
+    SFCNotFoundError,
+    png_to_map,
+    png_to_palette,
+    png_to_tiles,
+    sfc_run,
+)
 from retrotool.graphics.tiles import (
     TILE_BYTES,
     TILE_H,
@@ -57,4 +64,9 @@ __all__ = [
     "Atlas",
     "AtlasEntry",
     "pack_atlas",
+    "SFCNotFoundError",
+    "png_to_tiles",
+    "png_to_palette",
+    "png_to_map",
+    "sfc_run",
 ]
