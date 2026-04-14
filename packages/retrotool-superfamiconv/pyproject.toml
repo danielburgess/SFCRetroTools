@@ -1,0 +1,45 @@
+[project]
+name = "retrotool-superfamiconv"
+version = "0.1.0"
+description = "Bundled SuperFamiconv binary for retrotool graphics conversion"
+readme = "README.md"
+authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
+license = {text = "MIT"}
+requires-python = ">=3.12"
+keywords = ["snes", "sfc", "graphics", "superfamiconv", "tiles"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["retrotool_superfamiconv"]
+
+[tool.setuptools.package-data]
+retrotool_superfamiconv = ["bin/*"]
+
+[tool.cibuildwheel]
+# Only cpython, skip musllinux for now
+skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+before-all = "yum install -y gcc-c++ make || apt-get update && apt-get install -y g++ make"
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]

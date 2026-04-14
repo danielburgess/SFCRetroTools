@@ -1,3 +1,23 @@
 /out/
 /*.sfc
 /*_ptr_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.idea/
+*.whl
+*.tar.gz
+
+# cibuildwheel
+wheelhouse/
+
+# built binaries embedded at wheel-build time (not source)
+packages/retrotool-superfamiconv/retrotool_superfamiconv/bin/
+
+# MemPalace/other local tooling artifacts
+*.original.md
