@@ -1,6 +1,6 @@
 [project]
 name = "retrotool"
-version = "2.0.0.dev0"
+version = "0.8.0"
 description = "SNES/SFC ROM hacking toolkit"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
 license = {file = "LICENSE"}
