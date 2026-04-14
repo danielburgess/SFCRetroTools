@@ -1,18 +1,37 @@
 [project]
 name = "retrotool"
-version = "0.8.0"
-description = "SNES/SFC ROM hacking toolkit"
+version = "0.8.1"
+description = "SNES/SFC ROM hacking toolkit — address math, compression, script, debugger IPC, asar, Godot/Tiled export"
+readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
 license = {file = "LICENSE"}
+requires-python = ">=3.12"
+keywords = ["snes", "sfc", "rom-hacking", "retro", "nintendo", "asar", "mesen", "lzss", "godot", "tiled"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: Public Domain",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "chardet>=5.2.0",
 ]
-requires-python = ">=3.12"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["retrotool*"]
+exclude = ["tests*", "examples*"]
 
 [project.urls]
-"Homepage" = "https://github.com/danielburgess/SFCRetroTools"
+Homepage = "https://github.com/danielburgess/SFCRetroTools"
+Repository = "https://github.com/danielburgess/SFCRetroTools"
+Issues = "https://github.com/danielburgess/SFCRetroTools/issues"
