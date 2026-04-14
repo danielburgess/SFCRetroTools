@@ -4,8 +4,12 @@
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
-compression (LZSS + RLE), script dumping/insertion, pointer-table heuristics, Mesen2-Diz
+compression (LZSS + RLE), script dumping/insertion, pointer-table heuristics, [Mesen2-Diz](https://github.com/danielburgess/Mesen2-Diz)
 debugger IPC, asar patching, and Godot/Tiled/C++/Python export emitters.
+
+Built with automation and streamlined romhacking in mind — primarily targeting SNES/SFC work,
+wiring static analysis, live debugger IPC, patch builds, and asset export into a single
+scriptable pipeline instead of a pile of one-off tools.
 
 v0.8 is the first published version of the post-rewrite scope. The 0.1 line (address-only)
 still works through compatibility shims; 1.0 will land after examples + CLI + test suite.
