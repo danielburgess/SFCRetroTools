@@ -1,6 +1,6 @@
 # retrotool
 
-**SNES/SFC ROM hacking toolkit** — v0.8.0
+**SNES/SFC ROM hacking toolkit** — v0.8.1
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
@@ -416,7 +416,7 @@ These re-export from the new modules; existing scripts don't need updating to lo
 See [`project-plan.md`](./project-plan.md) for the full 16-phase plan and per-phase status.
 Short version:
 
-- **0.8** (current) — 12 library modules scaffolded, core paths smoke-tested.
+- **0.8.1** (current) — 12 library modules scaffolded, core paths smoke-tested.
 - **0.9** — CLI (`retrotool …` subcommands) + example projects (lm3, rbshura, zamn, minimal)
   + pytest suite.
 - **1.0** — GUI shell with project explorer, game-specific script editor, graphics extractor,

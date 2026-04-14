@@ -9,24 +9,77 @@ from typing import Optional, Union
 class Table:
     """Ported from v0.1 retrotool/script.py. Loads .tbl, encodes/decodes bytes↔text."""
 
-    def __init__(self, table_file: Union[str, Path]):
-        enc, val_map, char_map, err_count, cnt = self._load_table(table_file)
+    def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False):
+        enc, val_map, char_map, ctrl_lengths, ctrl_prefix, err_count, cnt = self._load_table(table_file)
         self.__val_map = val_map
         self.__chr_map = char_map
+        self.__ctrl_lengths = ctrl_lengths
+        self.__ctrl_prefix = ctrl_prefix
         self.__errors = err_count
         self.__parsed_lines = cnt
         self.__file_name = table_file
         self.__encoding = enc
+        if warn_duplicates:
+            self._check_duplicates()
+
+    def _check_duplicates(self) -> None:
+        """Warn about characters with multiple byte encodings (round-trip hazard)."""
+        from collections import defaultdict
+        char_to_vals: dict[str, list[int]] = defaultdict(list)
+        for val, ch in self.__val_map.items():
+            char_to_vals[ch].append(val)
+        dupes = {ch: sorted(vals) for ch, vals in char_to_vals.items() if len(vals) > 1}
+        if dupes:
+            print(f'WARNING: {self.__file_name} has {len(dupes)} characters '
+                  f'with duplicate encodings (round-trip mismatch risk):')
+            for ch, vals in sorted(dupes.items(), key=lambda x: x[1][0]):
+                hex_vals = ', '.join(f'${v:04X}' for v in vals)
+                used = self.__chr_map.get(ch)
+                print(f'  {ch!r:8s}: {hex_vals}  (encoder uses ${used:04X})')
 
     def _load_table(self, table_file, enc=None):
         enc = enc if enc is not None else self.detect_encoding(table_file)
         val_map: dict[int, str] = {}
         char_map: dict[str, int] = {}
+        ctrl_lengths: dict[int, int] = {}
+        ctrl_prefix: int = 0xFF
         err_count = 0
         cnt = 1
         with open(table_file, encoding=enc) as to:
+            first = True
             for line in to:
+                if first:
+                    if line.startswith('\ufeff'):
+                        line = line[1:]
+                    first = False
                 try:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith(';'):
+                        cnt += 1
+                        continue
+                    # @ctrl_prefix XX: sets the control-code prefix byte
+                    # (default $FF). Must appear before any @ctrl entries to
+                    # take effect; otherwise the default is used.
+                    if stripped.startswith('@ctrl_prefix '):
+                        ctrl_prefix = int(stripped[len('@ctrl_prefix '):].strip(), 16)
+                        cnt += 1
+                        continue
+                    # @ctrl directive: @ctrl XX=N defines control code <prefix> XX
+                    # with total byte length N (including the prefix).
+                    # Wildcards: @ctrl XX**=N applies to all <prefix> XX yy.
+                    if stripped.startswith('@ctrl '):
+                        parts = stripped[6:].split('=')
+                        if len(parts) == 2:
+                            pattern = parts[0].strip()
+                            length = int(parts[1].strip())
+                            if '**' in pattern:
+                                prefix = int(pattern.replace('**', ''), 16)
+                                for d in range(0x100):
+                                    ctrl_lengths[prefix * 0x100 + d] = length
+                            else:
+                                ctrl_lengths[int(pattern, 16)] = length
+                        cnt += 1
+                        continue
                     parts = line.split('=')
                     if len(parts) == 2:
                         val, ch = parts
@@ -50,7 +103,7 @@ class Table:
                     print(f"ERROR: {ex!r}")
                     err_count += 1
                 cnt += 1
-        return enc, val_map, char_map, err_count, cnt
+        return enc, val_map, char_map, ctrl_lengths, ctrl_prefix, err_count, cnt
 
     @staticmethod
     def _set_maps(in_val, in_ch, val_map, char_map):
@@ -75,6 +128,20 @@ class Table:
     @property
     def char_map(self) -> dict[str, int]:
         return self.__chr_map
+
+    @property
+    def ctrl_prefix(self) -> int:
+        """Control-code prefix byte (default $FF). Set via `@ctrl_prefix XX` directive."""
+        return self.__ctrl_prefix
+
+    @property
+    def ctrl_lengths(self) -> dict[int, int]:
+        """FF-control-code byte lengths parsed from @ctrl directives.
+
+        Keys: command byte(s) following the FF prefix. Values: total byte
+        length including the FF prefix itself. Prevents decoders from
+        splitting on 0x00 bytes that appear inside FF-command parameters."""
+        return self.__ctrl_lengths
 
     def get_value(self, word: str, infer_value: bool = True) -> Optional[int]:
         if not isinstance(word, str):
@@ -179,6 +246,127 @@ class Table:
         with open(file_path, 'rb') as f:
             raw = b''.join(f.readline() for _ in range(lines))
         return chardet.detect(raw)['encoding']
+
+    @staticmethod
+    def export_csv(filename: Union[str, Path], dict_data: list[dict]) -> None:
+        """Write list-of-dicts to `{filename}.csv` using the first row's keys as header."""
+        import csv
+        if not dict_data:
+            return
+        csv_columns = list(dict_data[0].keys())
+        csv_file = f"./{filename}.csv"
+        try:
+            with open(csv_file, 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=csv_columns)
+                writer.writeheader()
+                for row in dict_data:
+                    writer.writerow(row)
+        except IOError:
+            print("I/O error")
+
+    def check_for_lone_byte(self, bin_data, index, value: int = 0x0):
+        """Check for lone terminator byte; confirms it's not part of multi-byte value."""
+        start1 = index - 3
+        start2 = index - 2
+        end0 = index + 1
+        if bin_data[index] == value:
+            char1 = self.has_char(bin_data[start1:end0])
+            char2 = self.has_char(bin_data[start2:end0])
+            if char1 is not None or char2 is not None:
+                return 0, char1 or char2
+            return -1, None
+        return 0, None
+
+    def find_entry_end(self, bin_data, start: int, max_bytes: int = 3,
+                       max_addr: Optional[int] = None) -> int:
+        """Left-to-right decode to find terminating $00. Uses @ctrl lengths so
+        parameter bytes inside FF sequences aren't mistaken for terminators."""
+        ctrl = self.__ctrl_lengths
+        prefix = self.__ctrl_prefix
+        i = start
+        while i < len(bin_data):
+            if max_addr is not None and i >= max_addr:
+                return i
+            if bin_data[i] == prefix and i + 1 < len(bin_data):
+                cmd = bin_data[i + 1]
+                ctrl_len = ctrl.get(cmd, 3)
+                i += ctrl_len
+                continue
+            matched = False
+            for size in range(max_bytes, 1, -1):
+                if i + size > len(bin_data):
+                    continue
+                window = list(bin_data[i:i + size])
+                if size > 1 and window[-1] == 0xFF:
+                    continue
+                val = self.bytes_to_val(window, True)
+                if self.byte_size(val) != size:
+                    continue
+                if self.get_chars(val, False) is not None:
+                    i += size
+                    matched = True
+                    break
+            if not matched:
+                if bin_data[i] == 0x00:
+                    return i + 1
+                i += 1
+        return i
+
+    @staticmethod
+    def _is_binary_block(decoded_str: str, raw_data=None) -> bool:
+        """Heuristic: decoded output mostly bracketed control codes, or raw has interior $00s."""
+        in_bracket = 0
+        out_bracket = 0
+        inside = False
+        for ch in decoded_str:
+            if ch == '[':
+                inside = True
+            elif ch == ']':
+                inside = False
+                in_bracket += 1
+            elif inside:
+                pass
+            else:
+                out_bracket += 1
+        total = in_bracket + out_bracket
+        if total > 0 and in_bracket > out_bracket:
+            return True
+        if raw_data and len(raw_data) > 1:
+            interior = raw_data[:-1] if raw_data[-1] == 0 else raw_data
+            zero_count = sum(1 for b in interior if b == 0)
+            if zero_count > 0 and zero_count >= len(interior) * 0.15:
+                return True
+        return False
+
+    @staticmethod
+    def hex_dump(bin_data) -> str:
+        """Render bytes as bracketed hex escapes: [04][00][B3]..."""
+        return ''.join(f'[{b:02X}]' for b in bin_data)
+
+    def dump_script(self, filename: Union[str, Path], dict_data: list,
+                    deduplicate: bool = True) -> None:
+        """Dump decoded script entries to UTF-16 file; falls back to hex_dump for binary blocks."""
+        line1 = True
+        nl = "\n"
+        with open(filename, 'w', encoding='utf-16') as of:
+            dumped_addrs = []
+            for data in dict_data:
+                of.write(f"{'' if line1 else nl}<<{data.get('id')}>>{nl}")
+                addr = data.get('addr', None)
+                should_write = True
+                if deduplicate and addr is not None:
+                    if addr in dumped_addrs:
+                        should_write = False
+                    else:
+                        dumped_addrs.append(addr)
+                if should_write:
+                    raw = data['data']
+                    decoded = self.interpret_binary_data(raw)
+                    if self._is_binary_block(decoded, raw):
+                        of.write(self.hex_dump(raw))
+                    else:
+                        of.write(decoded)
+                line1 = False
 
     # ------------------------------------------------------------------
     # v2 additions
