@@ -74,12 +74,16 @@ class LZSSCodec(Codec):
                     break
             if ctrl & 0x01:
                 # literal
+                if src >= end:
+                    break
                 b = data[src]; src += 1
                 out.append(b)
                 ring[wpos] = b
                 wpos = (wpos + 1) & win_mask
             else:
                 # back-reference: [off_lo8] [((off>>8)<<4)|(len-min_match)]
+                if src + 2 > end:
+                    break
                 lo = data[src]; src += 1
                 hi = data[src]; src += 1
                 rpos = (lo | ((hi & 0xF0) << 4)) & win_mask
@@ -151,11 +155,18 @@ class LZSSCodec(Codec):
             best_off = 0
             max_len = min(p.max_match, n - src)
             if max_len >= p.min_match:
-                # Search ring buffer for longest match of data[src:src+max_len]
+                # Search ring buffer for longest match of data[src:src+max_len].
+                # Must simulate decoder overlap: during back-ref copy, the
+                # decoder writes each byte to wpos as it reads, so positions
+                # in [wpos, wpos+mlen) within the ring equal data[src..src+mlen).
                 for off in range(p.window_size):
-                    # Match length from offset `off`
                     mlen = 0
-                    while mlen < max_len and ring[(off + mlen) & win_mask] == data[src + mlen]:
+                    while mlen < max_len:
+                        pos = (off + mlen) & win_mask
+                        k = (pos - wpos) & win_mask
+                        rb = data[src + k] if k < mlen else ring[pos]
+                        if rb != data[src + mlen]:
+                            break
                         mlen += 1
                     if mlen > best_len:
                         best_len = mlen
