@@ -7,11 +7,24 @@ the build.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from retrotool.mbuild.spec import Section, SectionKind
+
+
+@dataclass
+class BuildContext:
+    """State shared across section handlers during a single build.
+
+    - `allocator` — freespace bump-allocator fed from `[mbuild].freespace`.
+    - `labels` — global label registry: name → PC offset. Populated from
+      `[[mbuild.labels]]` at parse time and from sections that declare
+      `export-label=`. Script fixups of the form `[HHHH@@name]` resolve here.
+    """
+    allocator: Optional[object] = None  # FreespaceAllocator — loose typed to avoid import cycle
+    labels: dict[str, int] = field(default_factory=dict)
 
 
 class HandlerError(RuntimeError):
@@ -60,21 +73,21 @@ def _write(rom: bytearray, offset: int, data: bytes, *, allow_grow: bool, source
 
 # ---- handlers -------------------------------------------------------------
 
-def handle_rep(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_rep(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     if section.offset is None:
         raise HandlerError(f"{section.source}: <rep> requires offset")
     data = _read_concat(section, root)
     return _write(rom, section.offset, data, allow_grow=False, source=section.source or "")
 
 
-def handle_ins(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_ins(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     if section.offset is None:
         raise HandlerError(f"{section.source}: <ins> requires offset")
     data = _read_concat(section, root)
     return _write(rom, section.offset, data, allow_grow=True, source=section.source or "")
 
 
-def handle_bin(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_bin(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Unified raw/compressed-bytes handler. Honors codec= and grow= (default 'replace')."""
     if section.offset is None:
         raise HandlerError(f"{section.source}: <bin> requires offset")
@@ -129,7 +142,7 @@ _BITPLANE_TRANSFORMS: dict[str, tuple[Callable[[bytes], bytes], Callable[[bytes]
 }
 
 
-def handle_graphics(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_graphics(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Tile/palette/tilemap data. Phase 3 wires raw planar passthrough; bitplane
     repacking (e.g. MBuild's "2bpp-to-1bpp-il") lands in a later phase."""
     if section.offset is None:
@@ -161,7 +174,7 @@ def bitplane_reverse(encode: Optional[str]) -> Callable[[bytes], bytes]:
     return _BITPLANE_TRANSFORMS[key][1]
 
 
-def handle_project(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_project(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Run a nested mbxml build against the current working ROM. The sub-spec's
     own `original` attr is ignored — the parent ROM is the canvas. Sub-spec
     sections are dispatched in order, with the sub-spec's own vars in scope
@@ -195,14 +208,14 @@ def handle_project(rom: bytearray, section: Section, root: Path) -> WriteRange:
                 f"{sub.source}: <project> sub-section kind <{sub.kind.value}> "
                 f"has no handler"
             )
-        h(rom, sub, sub_root)
+        h(rom, sub, sub_root, ctx)
 
     # <project> is non-cacheable; return a zero-length sentinel so the caller
     # doesn't treat the whole ROM as this section's output.
     return WriteRange(offset=0, length=0)
 
 
-def handle_asar(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_asar(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Apply an asar patch to the working ROM. Round-trips through a temp file
     because the `asar` CLI operates on disk. Section.attrs format:
       file=patch.asm  (required)
@@ -255,7 +268,7 @@ def handle_asar(rom: bytearray, section: Section, root: Path) -> WriteRange:
     return WriteRange(offset=0, length=len(new_rom))
 
 
-def handle_libsfx(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_libsfx(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Build a libSFX project and install the resulting ROM as the working canvas.
 
     Attrs:
@@ -302,34 +315,160 @@ def handle_libsfx(rom: bytearray, section: Section, root: Path) -> WriteRange:
     return WriteRange(offset=0, length=len(rom))
 
 
-def handle_script(rom: bytearray, section: Section, root: Path) -> WriteRange:
-    """Basic script encoder: each line of the text file is Table-encoded and
-    concatenated with a $00 terminator. Pointer-table emission lands in a later
-    phase (needs DataDef integration)."""
-    if section.offset is None:
-        raise HandlerError(f"{section.source}: <script> requires offset")
-    if section.table is None:
-        raise HandlerError(f"{section.source}: <script> requires table=… (table file)")
-    if not section.files:
-        raise HandlerError(f"{section.source}: <script> requires file=… (text source)")
+def _pc_to_lorom1_bytes(pc: int) -> bytes:
+    """24-bit LoROM1 SNES address, little-endian."""
+    bank = ((pc >> 15) & 0x7F) | 0x80
+    addr = (pc & 0x7FFF) | 0x8000
+    return bytes([addr & 0xFF, (addr >> 8) & 0xFF, bank & 0xFF])
 
-    pre = getattr(section, "_prepared", None)
-    if pre is not None:
+
+def _pc_to_lorom_within_bank(pc: int) -> int:
+    """16-bit within-bank LoROM address (bank implicit, $8000-$FFFF half)."""
+    return (pc & 0x7FFF) | 0x8000
+
+
+def _ensure_room(rom: bytearray, end: int) -> None:
+    if end > len(rom):
+        rom.extend(b"\x00" * (end - len(rom)))
+
+
+def handle_script(
+    rom: bytearray, section: Section, root: Path,
+    ctx: Optional[BuildContext] = None,
+) -> list[WriteRange]:
+    """Pointer-table-driven script insertion.
+
+    Emits: pointer table at `pointer-table`, then each entry's encoded text
+    at `pointer-table + count * pointer-size` onward (sequential, dedupe on
+    `orig_addr`). Overflow via `section.overflow` lands entries in freespace
+    through `ctx.allocator`. `[HHHH@N[:label]]` and `[HHHH@@name]` fixups
+    resolve after every placement is known.
+    """
+    if section.table is None:
+        raise HandlerError(f"{section.source}: <script> requires table=")
+    if not section.files:
+        raise HandlerError(f"{section.source}: <script> requires file=")
+    # Legacy mode: no pointer-table, just concatenate Table.encode_text(line)
+    # joined with $00. Kept so pre-phase-6 specs keep working.
+    if section.pointer_table is None:
+        if section.offset is None:
+            raise HandlerError(
+                f"{section.source}: <script> requires pointer-table= "
+                f"(or offset= for legacy concat mode)"
+            )
+        from retrotool.script.table import Table as _LegacyTable
+        tbl = _LegacyTable(_resolve(Path(str(section.table)), root))
+        text = _resolve(Path(str(section.files[0])), root).read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln]
+        data = b"\x00".join(tbl.encode_text(ln) for ln in lines) + b"\x00"
         grow = (section.grow or "replace").lower()
-        return _write(rom, section.offset, pre,
+        return _write(rom, section.offset, data,
                       allow_grow=(grow == "insert"), source=section.source or "")
 
-    from retrotool.script.table import Table  # heavy import — deferred
+    if section.count is None:
+        raise HandlerError(f"{section.source}: <script> requires count=")
 
-    table = Table(_resolve(Path(str(section.table)), root))
-    text_path = _resolve(Path(str(section.files[0])), root)
-    text = text_path.read_text(encoding="utf-8")
-    lines = [ln for ln in text.splitlines() if ln]
-    encoded = b"\x00".join(table.encode_text(ln) for ln in lines) + b"\x00"
+    from retrotool.script.encode import encode_script_file  # deferred import
 
-    grow = (section.grow or "replace").lower()
-    allow_grow = grow == "insert"
-    return _write(rom, section.offset, encoded, allow_grow=allow_grow, source=section.source or "")
+    ptr_size = section.pointer_size or 2
+    if ptr_size not in (2, 3):
+        raise HandlerError(
+            f"{section.source}: pointer-size must be 2 or 3, got {ptr_size}"
+        )
+
+    script_path = _resolve(Path(str(section.files[0])), root)
+    table_path = _resolve(Path(str(section.table)), root)
+    fallback_path = (
+        _resolve(Path(str(section.fallback_table)), root)
+        if section.fallback_table else None
+    )
+
+    entries = encode_script_file(
+        script_path, table_path,
+        fallback_table=fallback_path,
+        word_wrap=section.word_wrap,
+        textbuf_limit=section.textbuf_limit,
+    )
+    count = int(section.count)
+    while len(entries) < count:
+        entries.append((b"\x00", None, [], {}))
+    entries = entries[:count]
+
+    ptr_tbl_pc = section.pointer_table
+    ptr_tbl_len = count * ptr_size
+    data_start = ptr_tbl_pc + ptr_tbl_len
+
+    # TODO: overflow. First target (scene-desc-name) has none configured.
+    if section.overflow is not None:
+        raise HandlerError(
+            f"{section.source}: overflow strategy not yet wired in handle_script"
+        )
+
+    writes: list[WriteRange] = []
+    ptrs: list[int] = []
+    entry_pc: dict[int, int] = {}
+    entry_labels_pc: dict[int, dict[str, int]] = {}
+    pending: list[tuple[int, object]] = []  # (rom_pc_of_placeholder, ScriptFixup)
+    seen_addrs: dict[int, int] = {}
+    cur = data_start
+    for i, (enc, orig_addr, ent_fixups, ent_labels) in enumerate(entries):
+        is_dup = (orig_addr is not None and orig_addr in seen_addrs
+                  and enc == b"\x00")
+        if is_dup:
+            pc = seen_addrs[orig_addr]
+        else:
+            pc = cur
+            _ensure_room(rom, pc + len(enc))
+            rom[pc:pc + len(enc)] = enc
+            writes.append(WriteRange(offset=pc, length=len(enc)))
+            entry_pc[i] = pc
+            if ent_labels:
+                entry_labels_pc[i] = {n: pc + off for n, off in ent_labels.items()}
+            for fx in ent_fixups:
+                pending.append((pc + fx.offset, fx))
+            if orig_addr is not None:
+                seen_addrs[orig_addr] = pc
+            cur += len(enc)
+        ptrs.append(pc)
+
+    # Resolve all entry/global fixups uniformly.
+    for rom_pc, fx in pending:
+        if fx.global_label is not None:
+            if ctx is None or fx.global_label not in ctx.labels:
+                raise HandlerError(
+                    f"{section.source}: [HHHH@@{fx.global_label}] — "
+                    f"unknown global label"
+                )
+            target_pc = ctx.labels[fx.global_label]
+        else:
+            if fx.entry_idx not in entry_pc:
+                raise HandlerError(
+                    f"{section.source}: [HHHH@{fx.entry_idx}] → missing entry"
+                )
+            target_pc = entry_pc[fx.entry_idx]
+            if fx.label is not None:
+                target_labels = entry_labels_pc.get(fx.entry_idx, {})
+                if fx.label not in target_labels:
+                    raise HandlerError(
+                        f"{section.source}: [HHHH@{fx.entry_idx}:{fx.label}] — "
+                        f"label not defined in target entry"
+                    )
+                target_pc = target_labels[fx.label]
+        addr = _pc_to_lorom1_bytes(target_pc)
+        _ensure_room(rom, rom_pc + 3)
+        rom[rom_pc:rom_pc + 3] = addr
+
+    # Emit pointer table.
+    _ensure_room(rom, ptr_tbl_pc + ptr_tbl_len)
+    for i, pc in enumerate(ptrs):
+        if ptr_size == 3:
+            rom[ptr_tbl_pc + i * 3:ptr_tbl_pc + i * 3 + 3] = _pc_to_lorom1_bytes(pc)
+        else:
+            ptr16 = _pc_to_lorom_within_bank(pc)
+            rom[ptr_tbl_pc + i * 2] = ptr16 & 0xFF
+            rom[ptr_tbl_pc + i * 2 + 1] = (ptr16 >> 8) & 0xFF
+    writes.insert(0, WriteRange(offset=ptr_tbl_pc, length=ptr_tbl_len))
+    return writes
 
 
 # Dispatch table. Kinds without a Phase-2 handler raise via the default.
@@ -337,9 +476,16 @@ def handle_script(rom: bytearray, section: Section, root: Path) -> WriteRange:
 # `list[WriteRange]` when a section produces multiple disjoint writes
 # (e.g. the script handler emits pointer-table + per-entry inline +
 # freespace tails). The build driver normalizes both shapes to a list.
-HandlerFn = Callable[[bytearray, Section, Path], "WriteRange | list[WriteRange]"]
+#
+# The optional 4th arg (`ctx: BuildContext`) is passed by the build driver.
+# Handlers that don't need it keep the default `None` and the parameter
+# costs nothing.
+HandlerFn = Callable[
+    [bytearray, Section, Path, Optional[BuildContext]],
+    "WriteRange | list[WriteRange]",
+]
 
-def handle_fixed_records(rom: bytearray, section: Section, root: Path) -> WriteRange:
+def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Fixed-stride record table. Source = packed binary `file=`. Validates
     `len(file) == stride * count` (when both given). The structured-fields
     encoder (TOML records → packed bytes per `fields=` schema) is a follow-on."""

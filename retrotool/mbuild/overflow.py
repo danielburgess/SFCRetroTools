@@ -96,11 +96,25 @@ class TailWrite:
 
 
 @dataclass
+class PackFixup:
+    """Deferred pointer resolution for an overflow redirect.
+
+    `inline_offset` is the index within `Packed.inline` where a 3-byte
+    little-endian SNES pointer should be written. `target_pc` is the PC
+    offset the caller must encode via its address scheme. Strategies that
+    defer pointer baking emit these instead of writing the pointer inline.
+    """
+    inline_offset: int
+    target_pc: int
+
+
+@dataclass
 class Packed:
     """Result of packing one entry."""
     inline: bytes
     tails: list[TailWrite] = field(default_factory=list)
     overflow_used: bool = False
+    fixups: list[PackFixup] = field(default_factory=list)
 
 
 class OverflowStrategy(ABC):
@@ -191,12 +205,19 @@ class InlineRedirectStrategy(OverflowStrategy):
         pointer_encoder: Optional[Callable[[int], bytes]] = None,
         splitter: Optional[Callable[[bytes, int], int]] = None,
         redirect_back: bool = False,
+        defer_pointer: bool = False,
     ):
         self.marker = bytes(marker)
         self.pointer_size = pointer_size
         self.pointer_encoder = pointer_encoder or _default_pc_to_lorom1_le
         self.splitter = splitter
         self.redirect_back = redirect_back
+        # When True, the strategy writes a 3-byte `\xFF\xFF\xFF` placeholder at
+        # the pointer slot and returns a `PackFixup` in `Packed.fixups`. The
+        # caller (handle_script) resolves all fixups uniformly after every
+        # entry is placed, letting global labels and cross-entry refs share
+        # one code path.
+        self.defer_pointer = defer_pointer
 
     @property
     def stub_size(self) -> int:
@@ -235,6 +256,17 @@ class InlineRedirectStrategy(OverflowStrategy):
             tail = tail + self.marker + self.pointer_encoder(resume_pc)
 
         tail_pc = allocator.alloc(len(tail))
+        marker_off = len(inline_part)
+        ptr_off = marker_off + len(self.marker)
+        if self.defer_pointer:
+            placeholder = b"\xFF" * self.pointer_size
+            inline = inline_part + self.marker + placeholder
+            return Packed(
+                inline=inline,
+                tails=[TailWrite(offset=tail_pc, data=tail)],
+                overflow_used=True,
+                fixups=[PackFixup(inline_offset=ptr_off, target_pc=tail_pc)],
+            )
         ptr = self.pointer_encoder(tail_pc)
         if len(ptr) != self.pointer_size:
             raise ValueError(
