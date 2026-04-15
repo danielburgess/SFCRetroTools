@@ -1,22 +1,23 @@
 [project]
-name = "retrotool-superfamiconv"
+name = "retrotool-xdelta"
 version = "0.1.0"
-description = "Bundled SuperFamiconv binary for retrotool graphics conversion"
+description = "Bundled xdelta3 binary for retrotool mbuild diff generation"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
-keywords = ["snes", "sfc", "graphics", "superfamiconv", "tiles"]
+keywords = ["xdelta", "xdelta3", "diff", "patch", "snes", "rom"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Multimedia :: Graphics",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Archiving :: Compression",
 ]
 
 [build-system]
@@ -24,18 +25,17 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["retrotool_superfamiconv"]
+packages = ["retrotool_xdelta"]
 
 [tool.setuptools.package-data]
-retrotool_superfamiconv = ["bin/*"]
+retrotool_xdelta = ["bin/*"]
 
 [tool.cibuildwheel]
-# Only cpython, skip musllinux for now
 skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-all = "yum install -y gcc-c++ make || apt-get update && apt-get install -y g++ make"
+before-all = "yum install -y gcc make autoconf automake libtool || apt-get update && apt-get install -y gcc make autoconf automake libtool"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]

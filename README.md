@@ -1,6 +1,6 @@
 # retrotool
 
-**SNES/SFC ROM hacking toolkit** — v0.8.1
+**SNES/SFC ROM hacking toolkit** — v0.8.2
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
@@ -21,6 +21,37 @@ pip install retrotool
 ```
 
 Requires Python 3.12+ (uses stdlib `tomllib`).
+
+The `retrotool[libsfx]` extra (0.9.0+) bundles the full Optiroc SNES toolchain —
+libSFX runtime, ca65/ld65, SuperFamiconv, SuperFamicheck, BRRtools, lz4,
+`make_breakpoints` — as a single wheel with prebuilt binaries per platform.
+retrotool drives a complete libSFX build end-to-end with no external toolchain
+install, and you can pick either ca65 (via libsfx) or asar (existing) as the
+assembler on a per-project basis. See [libSFX assembly projects](#libsfx-assembly-projects)
+below, and [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough.
+
+### Library-or-CLI, your call
+
+Every capability is reachable from both a CLI subcommand **and** a plain
+Python import — retrotool is a library first, a CLI second. Build your own
+scripts, glue several projects together, or invoke subsystems directly from a
+Jupyter notebook; nothing is hidden behind the CLI. In the same codebase you
+can mix:
+
+- **`project.toml` projects** — retrotool-native layout (`[build.libsfx]`,
+  `[mbuild]`, per-table `tables/*.toml`).
+- **MBXML specs** — MBuild 1.29-compatible, auto-migrated; drop-in for
+  existing projects.
+- **libSFX projects** — ca65/ld65 + libSFX runtime, scaffolded or adopted.
+- **asar patches** — apply on top of any of the above.
+- **Raw Python** — every dataclass, codec, and handler importable; build
+  pipelines that don't look like anyone else's.
+
+> This is customizable to the max — arguably *too* customizable. That's
+> intentional. The end-game is a customizable GUI on top of this library
+> that manages projects, applies patches (including patch bundles pulled
+> from a GitHub repo by reference), and lets you modify each game with a
+> single workbench. See [Where this is going](#where-this-is-going) below.
 
 ## Package Layout
 
@@ -80,6 +111,16 @@ All pixel-level SNES formats.
 - `TilemapEntry` — 16-bit SNES tilemap word (tile 10b, palette 3b, priority, H-flip, V-flip).
 - `SpriteFrame` / `render_frame` — compose frames from positioned 8×8 tiles; `pack_atlas`
   returns an `Atlas` with per-frame `AtlasEntry` origin metadata.
+
+With the `[libsfx]` extra (0.9.0+):
+
+- `png_to_tiles(png, bpp=4, mode="snes", …)` — convert PNG to raw tile bytes.
+- `png_to_palette(png, mode="snes", colors=16, palettes=8)` — extract palette bytes.
+- `png_to_map(png, tiles, palette, bpp=4, mode="snes")` — build a tilemap that
+  references previously-emitted tile + palette bins.
+- `sfc_run(args)` — raw pass-through to the bundled SuperFamiconv binary.
+- `SFCNotFoundError` — raised when neither the bundled wheel nor a `superfamiconv`
+  on `PATH` is available.
 
 Not yet in v0.8: `font.py` (1BPP-IL VWF + 2BPP 16x16 glyph pipelines), `animation.py`.
 
@@ -184,6 +225,158 @@ LLM-assisted reverse-engineering scaffolding.
 - `ipc_prompt.IpcPlan` — structured Mesen-IPC command sequence an LLM can fill in and a
   `MesenClient` can consume directly.
 - `build_context(project, ...)` — project → prompt prelude.
+
+## MBXML builds
+
+`retrotool.mbuild` is an MBuild 1.29-compatible build pipeline plus extensions.
+Every element on a build spec describes one piece of ROM data; the same spec
+drives **build** (files → ROM) and **extract** (ROM → files).
+
+```
+retrotool build   <path> [-o out.sfc] [--no-cache] [--diff ips|xdelta|both]
+retrotool extract <path> [--dest DIR]
+retrotool migrate <file.mbxml> [--in-place]
+```
+
+`<path>` may be a `.mbxml`, a `.toml`, or a directory containing either
+(`project.toml` wins over `*.mbxml`).
+
+### MBuild 1.29 compatibility
+
+All MBuild 1.29 elements parse (`<build>`, `<rep>`, `<ins>`, `<lzr>/<lzi>`,
+`<rlr>/<rli>`, `<bpr>/<bpi>`, `<sbr>/<sbi>`, plus `pad`, `diff`, `revbyteloc`).
+Legacy codec-matrix elements are **auto-migrated in memory** to the unified
+form: `<lzr> → <bin codec= grow="replace">`, `<bpr> → <graphics>`,
+`<sbr> → <script>`, etc. `retrotool migrate` writes the migration back to
+disk (keeps a `.bak`). An `MBXMLDeprecationWarning` fires for each legacy tag.
+
+Scoped-out vs. MBuild 1.29: Lunar Compress codecs, BM5/SFCW RLE, Windows
+registry features. The first three land incrementally in 0.9.
+
+### Retrotool extensions
+
+- **Unified `<bin codec=>`** — `lzss-zamn`, `lzss-rbshura`, `lzss-legacy`,
+  `rle`. `grow="replace|insert|fail"` controls size-change behavior.
+- **`<graphics>`** — `offset`, `bpp`, `count`, `encode="planar|packed"`,
+  `codec=` dispatches through `retrotool.compression.registry`.
+- **`<script>`** — text/binary round-trip via `.tbl`; `pointer-table=`,
+  `table=`.
+- **`<asar>`** — build-only; runs an asar patch. `defines=` / `includes=`
+  are pipe-separated.
+- **`<libsfx src=… debug= stack-size=>`** — build-only; assembles a libSFX
+  project from scratch and installs the linked ROM as the working canvas.
+  Subsequent `<rep>/<ins>/<bin>/<asar>` sections patch on top. When a
+  `<libsfx>` is present, the `<build>` `original=` attr is optional.
+- **`<project src=…>`** — nested spec applied against the parent ROM.
+- **Variable interpolation** in any attr: `${env.FOO}`, `${build.path}`,
+  `${datadef.main_dialog.pointers.address}`.
+- **`if=` conditionals** (`==` / `!=` only) for multi-locale builds.
+- **`<include src=…>`** — recursive splice, cycle-detected.
+- **Per-section cache** — `retrotool.core.BuildCache` keyed on
+  `(kind, attrs, input SHA-256)`. Disable with `--no-cache`.
+- **Diff output** — pure-python IPS + xdelta3 subprocess (bundled via the
+  optional `retrotool-xdelta` wheel, falls back to system `xdelta3`).
+
+See `examples/mbxml/demo.mbxml` for a walkthrough.
+
+### Project.toml front-end
+
+The same pipeline accepts the retrotool-idiomatic `[mbuild]` table in a
+`project.toml`. Handlers, cache, extract are identical — pick whichever
+front-end you prefer per project, or reference MBXML fragments from
+`project.toml` via `<include>`.
+
+## libSFX assembly projects
+
+The `retrotool[libsfx]` extra bundles the Optiroc SNES toolchain (libSFX
+runtime + ca65/ld65 + SuperFamiconv + SuperFamicheck + BRRtools + lz4 +
+make\_breakpoints) as the companion wheel `retrotool-libsfx`. With it
+installed, retrotool can scaffold, assemble, link, header-fix, and emit
+Mesen breakpoints for a libSFX-layout project in pure Python — no user
+subprocess calls, no `make`.
+
+```bash
+pip install 'retrotool[libsfx]'
+
+# scaffold a fresh project from the bundled libSFX Template
+retrotool libsfx scaffold demo
+
+# build → demo/demo.sfc (+ .sym/.map/.bp when debug>=1)
+retrotool libsfx build demo --debug 2
+
+# inspect discovered sources + config
+retrotool libsfx info demo
+```
+
+Or, from Python:
+
+```python
+from pathlib import Path
+from retrotool.asm.libsfx import LibSFXProject, scaffold_libsfx_project
+
+scaffold_libsfx_project(Path("demo"), template="Template")
+project = LibSFXProject.discover(Path("demo"))
+project.cfg.debug = 2
+result = project.build()
+print(result.rom, result.checksum, result.breakpoints)
+```
+
+`project.toml` drives the defaults:
+
+```toml
+[build.libsfx]
+name = "demo"
+src = "./game_src"
+debug = 2
+stack_size = 0x200
+map_config = "Map_Mode21_2mbit.cfg"
+```
+
+### Driving libSFX from MBXML
+
+A libSFX build can also be embedded as an MBXML section. Subsequent
+`<rep>/<ins>/<bin>/<asar>` sections patch on top of the linked ROM:
+
+```xml
+<build name="demo">
+  <libsfx src="./game_src" debug="2"/>
+  <rep file="patch.bin" offset="10"/>
+</build>
+```
+
+See [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough,
+and [`plans/libsfx-native-integration.md`](plans/libsfx-native-integration.md)
+for the design rationale behind the A–J phase structure.
+
+## Where this is going
+
+retrotool is the **library floor** for a larger project: a desktop app that
+sits above this codebase and makes the whole loop — reverse engineer, build,
+patch, distribute — approachable without memorizing a CLI.
+
+Roughly in priority order:
+
+1. **Customizable project workbench.** A GUI that manages a project.toml /
+   MBXML / libSFX project, wires up the debugger, runs extract/build with
+   one click, and keeps per-game presets. Your scripts, your heuristics,
+   your panels — retrotool is designed to be embedded, not owned.
+2. **Patch manager.** Point at a ROM you own. The app computes SHA-256 /
+   header checksum, looks up matching patches from a curated index (think
+   `apt`/`npm` for ROM-hacks), shows compatibility + authorship +
+   dependencies, and applies them with xdelta/IPS/asar/MBXML under the
+   hood. Patches can be hosted anywhere — the index just holds references.
+3. **Patch authoring.** The same workbench used to *consume* patches can
+   publish them. Export a build pipeline as a reproducible patch bundle
+   (MBXML + assets + asar hooks) with the checksum of the ROM it targets.
+4. **Shared patch index (moonshot).** A community-maintained catalog
+   mapping ROM hashes → patches hosted in GitHub (or anywhere), so
+   "which translations and hacks exist for the cart I just dumped?"
+   becomes a one-click question. Federated, not centralized — the app
+   is the consumer, not the authority.
+
+This is ambitious and intentionally scoped beyond 1.0. What *is* in scope
+now: keep the library stable, keep the CLI honest, keep the pipeline
+reproducible. Everything above builds on those three.
 
 ## Quick Tours
 
@@ -318,6 +511,23 @@ tiles = decode_tiles(rom_data, offset=0x14_4000, count=64, bpp=4)
 first_rgba = tile_to_rgba(tiles[0], palette)   # 8*8*4 bytes
 ```
 
+### Convert a PNG to SNES tiles + palette + map (needs `[libsfx]` extra)
+
+```python
+from pathlib import Path
+from retrotool.graphics import png_to_tiles, png_to_palette, png_to_map
+
+png = "bg_layer.png"
+tiles = png_to_tiles(png, bpp=4)
+pal   = png_to_palette(png, colors=16, palettes=1)
+
+Path("tiles.bin").write_bytes(tiles)
+Path("pal.bin").write_bytes(pal)
+
+tilemap = png_to_map(png, tiles="tiles.bin", palette="pal.bin", bpp=4)
+Path("map.bin").write_bytes(tilemap)
+```
+
 ### Drive the Mesen2-Diz debugger
 
 ```python
@@ -416,11 +626,12 @@ These re-export from the new modules; existing scripts don't need updating to lo
 See [`project-plan.md`](./project-plan.md) for the full 16-phase plan and per-phase status.
 Short version:
 
-- **0.8.1** (current) — 12 library modules scaffolded, core paths smoke-tested.
+- **0.8.1** — 12 library modules scaffolded, core paths smoke-tested.
+- **0.8.2** (current) — LZSS overlap bugfix + optional SuperFamiconv 3graphics pipeline.
 - **0.9** — CLI (`retrotool …` subcommands) + example projects (lm3, rbshura, zamn, minimal)
   + pytest suite.
-- **1.0** — GUI shell with project explorer, game-specific script editor, graphics extractor,
-  built-in hex editor polling the debugger, pointer-table inspector, asar build panel; and
+- **1.0 and beyond** — GUI shell with customizable project explorer, game-adaptable script editor, graphics extractor, 
+  graphics editor, statistics polling the debugger, pointer-table inspector, asar build panel; and
   runtime-guided heuristics that combine static scans with live Mesen state (write-breakpoint
   pointer discovery, DMA-trace data localization, glyph-correlation text discovery, LZSS
   fingerprinting via ring-buffer detection).

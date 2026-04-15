@@ -1,3 +1,9 @@
-[submodule "packages/retrotool-superfamiconv/vendor/SuperFamiconv"]
-	path = packages/retrotool-superfamiconv/vendor/SuperFamiconv
-	url = https://github.com/Optiroc/SuperFamiconv
+[submodule "packages/retrotool-libsfx/vendor/libSFX"]
+	path = packages/retrotool-libsfx/vendor/libSFX
+	url = https://github.com/Optiroc/libSFX
+[submodule "packages/retrotool-xdelta/vendor/xdelta"]
+	path = packages/retrotool-xdelta/vendor/xdelta
+	url = https://github.com/jmacd/xdelta
+[submodule "packages/retrotool-asar/vendor/asar"]
+	path = packages/retrotool-asar/vendor/asar
+	url = https://github.com/RPGHacker/asar

@@ -142,6 +142,14 @@ class MesenClient:
     def remove_breakpoint(self, bp_id: int) -> None:
         self.call("removeBreakpoint", id=bp_id)
 
+    def load_breakpoints(self, bp_file) -> list[int]:
+        """Read a `.bp` file and register each entry. Returns new breakpoint ids."""
+        from retrotool.debugger.breakpoints import read_breakpoints, to_mesen_calls
+        ids: list[int] = []
+        for address, mem_type, break_on in to_mesen_calls(read_breakpoints(bp_file)):
+            ids.append(self.add_breakpoint(address, memory_type=mem_type, break_on=break_on))
+        return ids
+
     def evaluate(self, expr: str) -> Any:
         return self.call("evaluate", expression=expr).get("value")
 

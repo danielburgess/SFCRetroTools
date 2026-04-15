@@ -1,5 +1,13 @@
 """retrotool.debugger — Mesen2-Diz IPC integration."""
 from retrotool.debugger.automation import paused, run_until_breakpoint, snapshot_registers
+from retrotool.debugger.breakpoints import (
+    Breakpoint,
+    BreakpointError,
+    make_mesen_breakpoints,
+    parse_symfile,
+    read_breakpoints,
+    to_mesen_calls,
+)
 from retrotool.debugger.client import (
     DEFAULT_PIPE_NAME,
     IpcError,
@@ -21,4 +29,10 @@ __all__ = [
     "paused",
     "run_until_breakpoint",
     "snapshot_registers",
+    "Breakpoint",
+    "BreakpointError",
+    "make_mesen_breakpoints",
+    "parse_symfile",
+    "read_breakpoints",
+    "to_mesen_calls",
 ]

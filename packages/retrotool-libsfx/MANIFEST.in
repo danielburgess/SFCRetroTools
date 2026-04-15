@@ -1,0 +1,11 @@
+include README.md
+include setup.py
+include pyproject.toml
+recursive-include vendor *
+recursive-include retrotool_libsfx/bin *
+recursive-include retrotool_libsfx/include *
+recursive-include retrotool_libsfx/examples *
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .git
+global-exclude .gitignore

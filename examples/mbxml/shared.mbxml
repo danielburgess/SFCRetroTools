@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Pulled in by demo.mbxml via <include src="shared.mbxml"/>. Parent vars
+     (${env.*}, ${build.path}) are visible here; additions declared here are
+     local to the included file. Replace with your own shared sections. -->
+<build>
+  <!-- Example: a common palette block every locale patches identically. -->
+  <bin file="shared/palette.bin" offset="E0000"/>
+</build>

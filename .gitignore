@@ -17,7 +17,11 @@ dist/
 wheelhouse/
 
 # built binaries embedded at wheel-build time (not source)
-packages/retrotool-superfamiconv/retrotool_superfamiconv/bin/
+packages/retrotool-libsfx/retrotool_libsfx/bin/
+packages/retrotool-libsfx/retrotool_libsfx/include/
+packages/retrotool-libsfx/retrotool_libsfx/examples/
+packages/retrotool-xdelta/retrotool_xdelta/bin/
+packages/retrotool-asar/retrotool_asar/bin/
 
 # MemPalace/other local tooling artifacts
 *.original.md

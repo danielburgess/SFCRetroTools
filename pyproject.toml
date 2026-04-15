@@ -1,6 +1,6 @@
 [project]
 name = "retrotool"
-version = "0.8.1"
+version = "0.9.0"
 description = "SNES/SFC ROM hacking toolkit — address math, compression, script, debugger IPC, asar, Godot/Tiled export"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
@@ -24,7 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-graphics = ["retrotool-superfamiconv>=0.1.0"]
+# libsfx — full Optiroc SNES toolchain (libSFX + ca65 + SuperFamiconv +
+# SuperFamicheck + brrtools + lz4 + make_breakpoints).
+libsfx = ["retrotool-libsfx>=0.1.0"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -33,6 +35,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["retrotool*"]
 exclude = ["tests*", "examples*"]
+
+[project.scripts]
+retrotool = "retrotool.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/danielburgess/SFCRetroTools"

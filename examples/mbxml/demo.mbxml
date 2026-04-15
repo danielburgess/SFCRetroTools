@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  retrotool MBXML example — exercises the retrotool-only extensions on top of
+  the MBuild 1.29 schema. Build with:
+
+      retrotool build examples/mbxml/demo.mbxml
+
+  Build files (patch.bin, title.png, intro_text.txt, gfx.asm) live under
+  ${path} (out/) relative to this file; base.sfc lives alongside.
+-->
+<build original="base.sfc"
+       name="demo"
+       version="${env.VERSION}"
+       revision="01"
+       revbyteloc="7FDB"
+       path="out"
+       pad="true"
+       diff="both">
+
+  <!-- Plain byte replacement (MBuild-compatible). -->
+  <rep file="patch.bin" offset="11E3"/>
+
+  <!-- Retrotool extension: <bin codec=> replaces the MBuild <lzr>/<rlr> matrix.
+       Self-terminating codecs (lzss-zamn, lzss-rbshura) don't need size=. -->
+  <bin file="title.lz" offset="80000" codec="lzss-zamn"/>
+
+  <!-- Raw blob with explicit padding so the next section's offset is stable. -->
+  <bin file="header_table.bin" offset="9000" pad-to="100"/>
+
+  <!-- Graphics element: 4bpp planar tiles, compressed with lzss-rbshura. -->
+  <graphics file="title.png" offset="C0000"
+            bpp="4" encode="planar" codec="lzss-rbshura"/>
+
+  <!-- Script: text → binary via .tbl, pointers live at pointer-table=. -->
+  <script file="intro_text.txt" offset="100000"
+          pointer-table="1F0000" table="script.tbl"/>
+
+  <!-- asar patch — build-only, no symmetric extract. -->
+  <asar file="gfx.asm" defines="DEBUG=1"/>
+
+  <!-- Conditional build (retrotool extension). -->
+  <rep if="${env.LOCALE}==jp" file="jp/patch.bin" offset="11E3"/>
+
+  <!-- Split large projects with <include>. -->
+  <include src="shared.mbxml"/>
+</build>
