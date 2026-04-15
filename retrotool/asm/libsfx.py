@@ -190,7 +190,12 @@ class LibSFXProject:
                 if src_r.is_relative_to(self.root):
                     obj = self._obj_path(src, obj_ext)
                 else:
-                    obj = self.cfg.obj_dir / "_libsfx" / src.with_suffix(obj_ext).name
+                    if src_r.is_relative_to(libsfx_inc):
+                        rel = src_r.relative_to(libsfx_inc)
+                    else:
+                        rel = Path(src_r.name)
+                    flat = rel.with_suffix(obj_ext).as_posix().replace("/", "_")
+                    obj = self.cfg.obj_dir / "_libsfx" / flat
                 results[src] = asm.assemble(src, out_obj=obj)
 
         _run(self.cfg.cpu_sources + sfx_cpu, base_defs, ".o")

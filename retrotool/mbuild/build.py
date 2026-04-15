@@ -31,6 +31,9 @@ _CACHEABLE_KINDS = frozenset({
     SectionKind.GRAPHICS, SectionKind.SCRIPT,
 })
 
+# Bumped when the cache-key schema changes; old entries are ignored on read.
+_CACHE_VERSION = "2"
+
 
 def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
     """SHA-256 over section kind + attrs + input-file content hashes.
@@ -39,10 +42,15 @@ def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
     is missing (handler will raise its own error)."""
     if section.kind not in _CACHEABLE_KINDS:
         return None
-    parts: list[bytes] = [section.kind.value.encode()]
+    parts: list[bytes] = [f"v{_CACHE_VERSION}".encode(), section.kind.value.encode()]
     # Stable attr ordering — we hash dict items, not the dict.
     for k in sorted(section.attrs):
         parts.append(f"{k}={section.attrs[k]}".encode())
+    # `size` and `grow` are first-class Section fields, often absent from
+    # `attrs` after TOML coercion. Hash them explicitly so two sections that
+    # differ only in those fields don't collide.
+    parts.append(f"__size__={section.size}".encode())
+    parts.append(f"__grow__={section.grow}".encode())
     for f in section.files:
         path = (files_root / Path(str(f))).resolve()
         if not path.exists():
@@ -212,8 +220,14 @@ def build(
 
         cache_key = _section_cache_key(section, files_root) if cache else None
         if cache and cache_key and cache.has(cache_key) and section.offset is not None:
-            entry = cache.get(cache_key)
-            data = entry.artifact.read_bytes()
+            try:
+                entry = cache.get(cache_key)
+                data = entry.artifact.read_bytes()
+            except (OSError, AttributeError) as exc:
+                raise HandlerError(
+                    f"{section.source}: cached artifact unreadable for key "
+                    f"{cache_key[:12]}…: {exc}"
+                ) from exc
             end = section.offset + len(data)
             if end > len(rom):
                 rom.extend(b"\x00" * (end - len(rom)))
@@ -229,12 +243,14 @@ def build(
             cache.put(cache_key, bytes(rom[wr.offset:wr.end]),
                       meta={"kind": section.kind.value, "source": section.source or ""})
 
-    # Revision byte patch.
+    # Revision byte patch. Convention: plain digits parse as decimal; anything
+    # else is treated as hex (with optional `0x`/`$` prefix stripped).
     if spec.revbyteloc is not None and spec.revision is not None:
-        try:
-            rev_byte = int(spec.revision, 16) if not spec.revision.isdigit() else int(spec.revision)
-        except ValueError:
-            rev_byte = int(spec.revision, 0)
+        rev_str = spec.revision.strip()
+        if rev_str.isdigit():
+            rev_byte = int(rev_str)
+        else:
+            rev_byte = int(rev_str.removeprefix("0x").removeprefix("$"), 16)
         rom[spec.revbyteloc] = rev_byte & 0xFF
 
     if spec.pad:

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Bundled Optiroc SNES toolchain (libSFX, SuperFamiconv, ca65, SuperFamicheck, brrtools, lz4) for retrotool"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
-license = {text = "MIT"}
+license = {text = "MIT AND Zlib AND BSD-2-Clause"}
 requires-python = ">=3.12"
 keywords = ["snes", "sfc", "libsfx", "superfamiconv", "ca65", "brrtools", "toolchain"]
 classifiers = [
@@ -29,14 +29,14 @@ build-backend = "setuptools.build_meta"
 packages = ["retrotool_libsfx"]
 
 [tool.setuptools.package-data]
-retrotool_libsfx = ["bin/*", "include/**/*", "examples/**/*"]
+retrotool_libsfx = ["bin/*", "include/**/*", "examples/**/*", "licenses/*"]
 
 [tool.cibuildwheel]
 skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-all = "yum install -y gcc-c++ make || apt-get update && apt-get install -y g++ make"
+before-all = "yum install -y gcc-c++ make cmake || { apt-get update && apt-get install -y g++ make cmake; }"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]

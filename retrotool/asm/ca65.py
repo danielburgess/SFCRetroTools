@@ -134,9 +134,9 @@ class Ca65Assembler:
         out_obj = Path(out_obj)
         out_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.cache is not None:
-            key = self._cache_key(src)
-            hit = self.cache.get(key)
+        cache_key = self._cache_key(src) if self.cache is not None else None
+        if self.cache is not None and cache_key is not None:
+            hit = self.cache.get(cache_key)
             if hit is not None:
                 out_obj.write_bytes(hit.artifact.read_bytes())
                 return AsmResult(obj=out_obj, stdout="", stderr="[cache hit]",
@@ -151,9 +151,9 @@ class Ca65Assembler:
                 f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
             )
 
-        if self.cache is not None:
+        if self.cache is not None and cache_key is not None:
             self.cache.put(
-                self._cache_key(src),
+                cache_key,
                 out_obj.read_bytes(),
                 meta={"src": str(src), "cpu": self.cpu,
                       "ca65_version": _toolchain.tool_version("ca65")},

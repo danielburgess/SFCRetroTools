@@ -84,6 +84,26 @@ open candidates for the next round of ports.
 
 ## Project File Format
 
+### Example files shipped in this repo
+
+Concrete, runnable references — copy any of these as the starting
+point for a new project:
+
+| Path | Format | What it shows |
+|------|--------|---------------|
+| [`examples/mbxml/demo.mbxml`](examples/mbxml/demo.mbxml) | MBXML | Retrotool extensions over MBuild 1.29: unified `<bin codec=>`, `<graphics>`, `<script>`, `<asar>`, `${var}` interpolation, `if=` conditionals, `<include>`. Build with `VERSION=v1 LOCALE=en retrotool build demo.mbxml`. |
+| [`examples/mbxml/shared.mbxml`](examples/mbxml/shared.mbxml) | MBXML | Demonstrates the `<include>` mechanism — sections defined here splice into `demo.mbxml`. |
+| [`examples/mbxml/README.md`](examples/mbxml/README.md) | walkthrough | Build / extract / migrate command reference. |
+| [`examples/libsfx-hello/hello.mbxml`](examples/libsfx-hello/hello.mbxml) | MBXML | Two-section spec — `<libsfx src=…>` builds a libSFX project as the working ROM canvas, then `<rep>` patches bytes on top. |
+| [`examples/libsfx-hello/README.md`](examples/libsfx-hello/README.md) | walkthrough | 4-step end-to-end: scaffold → CLI build → MBXML build → Mesen load. Includes Python API equivalents. |
+
+A `project.toml` example shipping in `examples/` is **still pending**
+(tracked under "open CLI/examples work" below). For a real-world
+reference today, see `/mnt/crucial/projects/sfc-lm3-eng/project.toml` —
+the LM3 translation project that drove the original retrotool
+consolidation. The schema below is the canonical shape both shipped
+and pending examples will use.
+
 ### `project.toml` — Central Definition
 
 ```toml
@@ -118,6 +138,12 @@ pipe_name = "auto"
 ```
 
 ### Per-Table Data Definition (`scripts/main_dialog.toml`)
+
+Convention: drop one TOML per logical data block under a project
+subdirectory (`scripts/`, `tables/`, `gfx/`, `levels/`). The root
+`project.toml` references them via `[mbuild].include = […]`. A live
+example of this layout is `/mnt/crucial/projects/sfc-lm3-eng/scripts/`.
+
 
 ```toml
 [table]

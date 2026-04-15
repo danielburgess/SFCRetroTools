@@ -1,5 +1,6 @@
 recursive-include vendor *
-global-exclude .git
+prune vendor/**/.git
+prune vendor/.git
 global-exclude .github
 global-exclude *.pyc
 global-exclude __pycache__

@@ -84,6 +84,9 @@ class Section:
     # Set when the parser auto-migrated a MBuild 1.29 legacy element
     # (e.g. <lzr> → kind=BIN, original_kind=LZR). None for native-form sections.
     original_kind: Optional["SectionKind"] = None
+    # Transient: bytes populated by `parallel_prepare` for eligible kinds; the
+    # serial handler path checks this before re-encoding. Not compared or repr'd.
+    _prepared: Optional[bytes] = field(default=None, repr=False, compare=False)
 
 
 @dataclass

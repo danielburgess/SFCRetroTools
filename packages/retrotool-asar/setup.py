@@ -82,9 +82,25 @@ def _build_asar() -> None:
     os.chmod(dst, 0o755)
 
 
+def _copy_licenses() -> None:
+    """Vendored asar ships as LGPL-3+. Surface the license files inside the
+    wheel so downstream consumers satisfy the LGPL attribution requirement."""
+    lic_dir = HERE / "retrotool_asar" / "licenses"
+    lic_dir.mkdir(parents=True, exist_ok=True)
+    asar_root = VENDOR / "asar"
+    for name in ("LICENSE", "license-lgpl.txt", "license-gpl.txt", "license-wtfpl.txt", "README.md"):
+        src = asar_root / name
+        if src.exists():
+            shutil.copy2(src, lic_dir / f"asar-{name}")
+
+
 class BuildPyWithAsar(build_py):
     def run(self):
-        _build_asar()
+        # Skip native compile during sdist creation — contributors without
+        # cmake/compilers must still be able to produce source distributions.
+        if not os.environ.get("RETROTOOL_SKIP_NATIVE_BUILD"):
+            _build_asar()
+            _copy_licenses()
         super().run()
 
 

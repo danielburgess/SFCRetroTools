@@ -7,7 +7,8 @@ File paths with Windows separators are normalized to POSIX in-memory.
 from __future__ import annotations
 
 import warnings
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # types only (Element, Comment, tostring)
+import defusedxml.ElementTree as DET  # parsing — rejects entity-expansion attacks
 from pathlib import Path, PurePosixPath
 from typing import Literal, Optional
 
@@ -124,7 +125,7 @@ def parse_mbxml(
     defines: Optional[dict[str, str]] = None,
 ) -> BuildSpec:
     path = Path(path)
-    tree = ET.parse(path)
+    tree = DET.parse(path)
     return _build_from_root(
         tree.getroot(), strict=strict, source_path=path,
         deprecations=deprecations, defines=defines,
@@ -139,7 +140,7 @@ def parse_mbxml_string(
     deprecations: DeprecationMode = "warn",
     defines: Optional[dict[str, str]] = None,
 ) -> BuildSpec:
-    root = ET.fromstring(text)
+    root = DET.fromstring(text)
     return _build_from_root(
         root, strict=strict, source_path=Path(source),
         deprecations=deprecations, defines=defines,
@@ -166,7 +167,7 @@ def _resolve_include(
         raise IncludeError(f"{parent}: <include> src not found: {inc_path}")
     seen = seen | {inc_path}
 
-    tree = ET.parse(inc_path)
+    tree = DET.parse(inc_path)
     root = tree.getroot()
     if root.tag != "build":
         raise IncludeError(f"{inc_path}: included file root must be <build>")
@@ -276,7 +277,10 @@ def _section_from_element(
         files = [_norm_path(attrs["src"])]
 
     codec = attrs.get("lztype") or attrs.get("rletype") or attrs.get("bptype") or attrs.get("encode")
-    table = _norm_path(attrs["table"]) if "table" in attrs else None
+    # Schema permits both `table` (TOML canonical) and `table-file` (legacy
+    # mbxml). Prefer `table`; fall back to `table-file`.
+    _table_raw = attrs.get("table") or attrs.get("table-file")
+    table = _norm_path(_table_raw) if _table_raw else None
 
     return Section(
         kind=kind,
@@ -319,7 +323,7 @@ def migrate_mbxml_string(text: str) -> str:
     """Return `text` with all legacy MBuild 1.29 elements rewritten to unified form.
 
     Round-trip safe — unknown elements untouched."""
-    root = ET.fromstring(text)
+    root = DET.fromstring(text)
     _migrate_tree(root)
     # ET.tostring drops the original XML declaration; preserve the visible content.
     return ET.tostring(root, encoding="unicode")

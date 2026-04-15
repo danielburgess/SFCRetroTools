@@ -144,8 +144,12 @@ def _score_header(h: RomHeader, addr_type: int) -> int:
     return score
 
 
-def lorom_to_hirom(in_data) -> list:
-    """Double every bank: LoROM image → HiROM layout. Quick & dirty."""
+def lorom_to_hirom(in_data, *, clear_bank0: bool = False) -> list:
+    """Double every bank: LoROM image → HiROM layout.
+
+    `clear_bank0=True` preserves the legacy quirk that filled HiROM bank `$C0`
+    with `0xFF` instead of mirroring LoROM bank `$00`. Default off — bank 0 is
+    real ROM data and must be mirrored for a valid HiROM image."""
     final_data = [0xFF] * (len(in_data) * 2)
     div = 0x8000
     pcs = len(in_data) // div
@@ -153,6 +157,6 @@ def lorom_to_hirom(in_data) -> list:
         for d in range(div):
             pc_pos = d + (c * div)
             hirom_pos = d + (c * 0x10000)
-            final_data[hirom_pos] = 0xFF if c == 0 else in_data[pc_pos]
+            final_data[hirom_pos] = 0xFF if (clear_bank0 and c == 0) else in_data[pc_pos]
             final_data[hirom_pos + div] = in_data[pc_pos]
     return final_data

@@ -184,7 +184,6 @@ def handle_project(rom: bytearray, section: Section, root: Path) -> WriteRange:
     if sub_spec.path is not None:
         sub_root = (sub_root / Path(str(sub_spec.path))).resolve()
 
-    start_len = len(rom)
     for sub in sub_spec.sections:
         if sub.condition is not None:
             from retrotool.mbuild.interpolate import evaluate_condition
@@ -198,7 +197,9 @@ def handle_project(rom: bytearray, section: Section, root: Path) -> WriteRange:
             )
         h(rom, sub, sub_root)
 
-    return WriteRange(offset=0, length=max(len(rom), start_len))
+    # <project> is non-cacheable; return a zero-length sentinel so the caller
+    # doesn't treat the whole ROM as this section's output.
+    return WriteRange(offset=0, length=0)
 
 
 def handle_asar(rom: bytearray, section: Section, root: Path) -> WriteRange:
@@ -241,8 +242,15 @@ def handle_asar(rom: bytearray, section: Section, root: Path) -> WriteRange:
             raise HandlerError(f"{section.source}: asar failed:\n{result.log}")
         new_rom = rom_out.read_bytes()
 
-    # Asar may grow the ROM (BANK directives). Replace contents in-place so the
-    # caller's bytearray reference stays valid.
+    # Asar may grow the ROM (BANK directives) but must not shrink it — a shorter
+    # result silently truncates downstream section writes. Opt out per-section
+    # with allow-shrink="1" when the shrink is intentional.
+    allow_shrink = (section.attrs.get("allow-shrink") or "").lower() in ("1", "true", "yes")
+    if len(new_rom) < len(rom) and not allow_shrink:
+        raise HandlerError(
+            f"{section.source}: asar shrank ROM from {len(rom)} to {len(new_rom)} bytes "
+            f"(set allow-shrink=\"1\" to permit)"
+        )
     rom[:] = new_rom
     return WriteRange(offset=0, length=len(new_rom))
 

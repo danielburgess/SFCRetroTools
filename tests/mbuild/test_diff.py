@@ -19,6 +19,13 @@ from retrotool.mbuild import (
     write_xdelta,
     xdelta_available,
 )
+
+
+@pytest.fixture
+def xdelta_binary():
+    """Runtime-evaluated skip — avoids freezing toolchain state at collection."""
+    if not xdelta_available():
+        pytest.skip("xdelta3 binary not available")
 from retrotool.mbuild.diff import _encode_ips_runs, _pack_ips_record
 
 
@@ -179,8 +186,42 @@ def test_xdelta_required_raises_when_missing(monkeypatch, tmp_path):
                      tmp_path / "x.xdelta", required=True)
 
 
-@pytest.mark.skipif(not xdelta_available(), reason="xdelta3 binary not on PATH")
-def test_xdelta_real_binary_round_trip(tmp_path):
+# ---- H6: SMC-header parity assertion --------------------------------------
+
+
+def test_write_diff_rejects_header_mismatch(tmp_path):
+    """If one ROM has an SMC header and the other doesn't, every IPS offset
+    would be shifted by 512 bytes — `write_diff` must surface this loudly."""
+    from retrotool.mbuild.diff import write_diff
+    headerless = _make_lorom(tmp_path, marker=b"NOHEADER")
+    headered = tmp_path / "headered.sfc"
+    headered.write_bytes(b"\x00" * 512 + headerless.read_bytes())  # prepend SMC
+    with pytest.raises(DiffError, match="SMC-header mismatch"):
+        write_diff("ips", original_path=headerless, modified_path=headered,
+                   out_path=tmp_path / "p.ips")
+
+
+def test_write_diff_passes_when_both_headerless(tmp_path):
+    from retrotool.mbuild.diff import write_diff
+    a = _make_lorom(tmp_path, marker=b"A")
+    b = _make_lorom(tmp_path, marker=b"B")
+    d = write_diff("ips", original_path=a, modified_path=b,
+                   out_path=tmp_path / "p.ips")
+    assert d.path.exists()
+
+
+def test_write_diff_passes_when_both_headered(tmp_path):
+    from retrotool.mbuild.diff import write_diff
+    body_a = _make_lorom(tmp_path, marker=b"AA").read_bytes()
+    body_b = _make_lorom(tmp_path, marker=b"BB").read_bytes()
+    a = tmp_path / "ha.sfc"; a.write_bytes(b"\x00" * 512 + body_a)
+    b = tmp_path / "hb.sfc"; b.write_bytes(b"\x00" * 512 + body_b)
+    d = write_diff("ips", original_path=a, modified_path=b,
+                   out_path=tmp_path / "p.ips")
+    assert d.path.exists()
+
+
+def test_xdelta_real_binary_round_trip(tmp_path, xdelta_binary):
     orig = _make_lorom(tmp_path, marker=b"ORIG")
     mod = _make_lorom(tmp_path, marker=b"MODIFIED")
     out = tmp_path / "delta.xdelta"

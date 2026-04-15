@@ -87,7 +87,17 @@ def apply_patch(
 
     defines = []
     for k, v in patch.defines.items():
-        defines += ["-D", f"{k}={v}"]
+        # Asar's CLI tokenizer splits on whitespace inside the define value, so
+        # `PATCH_TITLE=My Game` becomes two tokens. Reject the ambiguous chars
+        # rather than silently corrupting the patch.
+        sv = str(v)
+        if any(ch in sv for ch in ' \t\n"='):
+            raise ValueError(
+                f"asar define value for {k!r} contains whitespace, '\"', or '=' "
+                f"({sv!r}) — asar's CLI tokenizer cannot represent it. "
+                f"Use a `!define` line in an .asm include instead."
+            )
+        defines += ["-D", f"{k}={sv}"]
     cmd = [binary, *defines, str(patch.asm_file), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = (proc.stdout or "") + (proc.stderr or "")
