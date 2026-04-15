@@ -245,7 +245,10 @@ class SFCAddress:
             if verbose:
                 print("lorom1_to_pc: Given Address is invalid.")
             return None
-        if not (0x8000 <= snes_addr <= 0x6FFFFF):
+        # LoROM1 window: banks $00–$6F, pages $8000–$FFFF. The lower bound is a
+        # bank/page check, not a flat min; the previous `0x8000 <= x <= 0x6FFFFF`
+        # was an empty interval (start > end) that always fell through.
+        if snes_addr < 0x008000 or snes_addr > 0x6FFFFF or (snes_addr & 0xFFFF) < 0x8000:
             if verbose:
                 print("Not a valid LoROM1 address!")
             return cls.lorom2_to_pc(snes_addr, verbose) if fallback else None

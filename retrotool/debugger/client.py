@@ -134,8 +134,11 @@ class MesenClient:
     def step(self, count: int = 1) -> None:
         self.call("step", count=count)
 
-    def add_breakpoint(self, address: int, memory_type: str = "SnesPrgRom",
+    def add_breakpoint(self, address: int, memory_type: str = "SnesMemory",
                        break_on: str = "exec") -> int:
+        """Default `memory_type="SnesMemory"` matches the bus-address space
+        Mesen's exec breakpoints expect (and what `to_mesen_calls` emits). Use
+        `"SnesPrgRom"` only when targeting a raw PRG-ROM file offset."""
         data = self.call("addBreakpoint", address=address, memoryType=memory_type, type=break_on)
         return int(data.get("id", -1))
 

@@ -33,7 +33,7 @@ XDELTA_SRC = VENDOR / "xdelta" / "xdelta3"
 BIN_DIR = HERE / "retrotool_xdelta" / "bin"
 
 EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
-MAKE_CMD = "mingw32-make" if sys.platform == "win32" else "make"
+MAKE_CMD = "make"
 
 
 def _patch_xdelta3(src: Path) -> None:
@@ -65,17 +65,31 @@ def _build_xdelta3() -> None:
     _patch_xdelta3(XDELTA_SRC)
 
     env = os.environ.copy()
-    # Always regenerate: our Makefile.am patch above invalidates any shipped
-    # configure/Makefile.in, and autoreconf is cheap relative to the build.
-    subprocess.check_call(["autoreconf", "-fi"], cwd=XDELTA_SRC, env=env)
-    subprocess.check_call(
-        ["./configure", "--enable-static", "--disable-shared"],
-        cwd=XDELTA_SRC, env=env,
-    )
-    subprocess.check_call([MAKE_CMD, "-j"], cwd=XDELTA_SRC, env=env)
+    if sys.platform == "win32":
+        subprocess.check_call(
+            [
+                "msbuild", "xdelta3.vcxproj",
+                "/p:Configuration=Release", "/p:Platform=x64",
+            ],
+            cwd=XDELTA_SRC, env=env,
+        )
+    else:
+        # Always regenerate: our Makefile.am patch above invalidates any shipped
+        # configure/Makefile.in, and autoreconf is cheap relative to the build.
+        subprocess.check_call(["autoreconf", "-fi"], cwd=XDELTA_SRC, env=env)
+        subprocess.check_call(
+            ["./configure", "--enable-static", "--disable-shared"],
+            cwd=XDELTA_SRC, env=env,
+        )
+        subprocess.check_call([MAKE_CMD, "-j"], cwd=XDELTA_SRC, env=env)
 
     exe = f"xdelta3{EXE_SUFFIX}"
-    candidates = [XDELTA_SRC / exe, XDELTA_SRC / ".libs" / exe]
+    candidates = [
+        XDELTA_SRC / exe,
+        XDELTA_SRC / ".libs" / exe,
+        XDELTA_SRC / "x64" / "Release" / exe,
+        XDELTA_SRC / "Release" / exe,
+    ]
     src = next((c for c in candidates if c.exists()), None)
     if src is None:
         raise RuntimeError(f"xdelta3 build did not produce {exe}")
@@ -85,9 +99,22 @@ def _build_xdelta3() -> None:
     os.chmod(dst, 0o755)
 
 
+def _copy_licenses() -> None:
+    """Ship xdelta's Apache-2.0 license inside the wheel for attribution."""
+    lic_dir = HERE / "retrotool_xdelta" / "licenses"
+    lic_dir.mkdir(parents=True, exist_ok=True)
+    xdelta_root = VENDOR / "xdelta"
+    for name in ("LICENSE", "COPYING", "README.md"):
+        src = xdelta_root / name
+        if src.exists():
+            shutil.copy2(src, lic_dir / f"xdelta-{name}")
+
+
 class BuildPyWithXdelta3(build_py):
     def run(self):
-        _build_xdelta3()
+        if not os.environ.get("RETROTOOL_SKIP_NATIVE_BUILD"):
+            _build_xdelta3()
+            _copy_licenses()
         super().run()
 
 

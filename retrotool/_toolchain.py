@@ -37,7 +37,8 @@ _PATH_NAMES: dict[str, str] = {
     "make_breakpoints": "make_breakpoints",
 }
 
-_USE_SYSTEM = os.environ.get("RETROTOOL_USE_SYSTEM_TOOLS") == "1"
+def _use_system() -> bool:
+    return os.environ.get("RETROTOOL_USE_SYSTEM_TOOLS") == "1"
 
 
 def _bundled(attr: str) -> Path | None:
@@ -57,7 +58,7 @@ def _bundled(attr: str) -> Path | None:
 
 def _resolve_binary(name: str) -> Path:
     """Resolve a binary by name. Bundled wheel first (unless overridden), then $PATH."""
-    if not _USE_SYSTEM:
+    if not _use_system():
         p = _bundled(f"{name}_binary")
         if p is not None and p.exists():
             return p

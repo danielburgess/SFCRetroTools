@@ -4,12 +4,13 @@ version = "0.1.0"
 description = "Bundled asar (RPGHacker) 65816 patcher binary for retrotool"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
-license = {text = "MIT"}
+license = {text = "MIT AND LGPL-3.0-or-later"}
 requires-python = ">=3.12"
 keywords = ["asar", "65816", "snes", "sfc", "patcher", "assembler"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
@@ -27,14 +28,14 @@ build-backend = "setuptools.build_meta"
 packages = ["retrotool_asar"]
 
 [tool.setuptools.package-data]
-retrotool_asar = ["bin/*"]
+retrotool_asar = ["bin/*", "licenses/*"]
 
 [tool.cibuildwheel]
 skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-all = "yum install -y gcc-c++ make cmake || apt-get update && apt-get install -y g++ make cmake"
+before-all = "yum install -y gcc-c++ make cmake || { apt-get update && apt-get install -y g++ make cmake; }"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]

@@ -46,7 +46,6 @@ def test_asar_handler_invokes_patcher(tmp_path, monkeypatch):
 
     def _fake_apply(rom_in, patch, rom_out):
         captured["patch"] = patch
-        captured["rom_in_bytes"] = rom_in.read_bytes()
         # Simulate asar writing a one-byte mod at offset 0.
         out = bytearray(rom_in.read_bytes())
         out[0] = 0x42

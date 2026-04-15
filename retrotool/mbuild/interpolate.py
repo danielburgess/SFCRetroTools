@@ -40,8 +40,9 @@ def interpolate_attrs(
 
 # ---- conditions -----------------------------------------------------------
 
-# Operators in precedence order (longest match wins).
-_COND_OPS = ("!=", "==")
+# Outermost operator wins — single regex avoids precedence errors when the
+# comparison value itself contains an operator substring (e.g. `en!=ja`).
+_COND_RE = re.compile(r"^(.*?)\s*(==|!=)\s*(.*)$", re.DOTALL)
 
 
 def evaluate_condition(expr: str, vars: dict[str, str], *, source: str = "") -> bool:
@@ -51,15 +52,13 @@ def evaluate_condition(expr: str, vars: dict[str, str], *, source: str = "") -> 
     (no quoting required) — trailing whitespace is stripped.
     """
     rendered = interpolate(expr, vars, source=source)
-    for op in _COND_OPS:
-        if op in rendered:
-            lhs, rhs = rendered.split(op, 1)
-            if op == "==":
-                return lhs.strip() == rhs.strip()
-            return lhs.strip() != rhs.strip()
-    raise InterpolationError(
-        f"{source}: condition {expr!r} must contain one of {_COND_OPS}"
-    )
+    m = _COND_RE.match(rendered)
+    if not m:
+        raise InterpolationError(
+            f"{source}: condition {expr!r} must contain one of ('==', '!=')"
+        )
+    lhs, op, rhs = m.group(1).strip(), m.group(2), m.group(3).strip()
+    return lhs == rhs if op == "==" else lhs != rhs
 
 
 # ---- vars assembly --------------------------------------------------------

@@ -288,9 +288,10 @@ def extract(
     raw = original_rom.read_bytes()
     _, body = _strip_smc_header(raw)
 
-    files_root = dest_root if dest_root is not None else source_root
-    if spec.path is not None and dest_root is None:
-        files_root = (source_root / Path(str(spec.path))).resolve()
+    # Mirror build(): files_root = base + spec.path (always), where base is
+    # dest_root when given, else source_root.
+    base = dest_root if dest_root is not None else source_root
+    files_root = (base / Path(str(spec.path))).resolve() if spec.path is not None else base
 
     only_l = {s.lower() for s in (only or set())}
     skip_l = {s.lower() for s in (skip or set())}

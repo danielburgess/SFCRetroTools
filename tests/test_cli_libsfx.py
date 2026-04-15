@@ -9,28 +9,25 @@ import pytest
 
 from retrotool.cli import main
 
-_HAS_LIBSFX = False
-try:
-    import retrotool_libsfx  # noqa: F401
-    _HAS_LIBSFX = True
-except ImportError:
-    pass
+@pytest.fixture
+def libsfx_wheel():
+    """Skip at call time if the retrotool_libsfx wheel isn't importable."""
+    pytest.importorskip("retrotool_libsfx")
 
 
-def _examples_available() -> bool:
+@pytest.fixture
+def examples_dir(libsfx_wheel):
+    """Skip at call time if the bundled libSFX examples/ tree is missing.
+
+    Evaluated after any autouse fixture resets the toolchain cache, so a
+    stale collection-time result won't force a skip when the wheel is in fact
+    available for this test run.
+    """
     from retrotool import _toolchain
     try:
-        _toolchain.libsfx_examples()
-        return True
+        return _toolchain.libsfx_examples()
     except Exception:
-        return False
-
-
-libsfx = pytest.mark.skipif(not _HAS_LIBSFX, reason="retrotool_libsfx not installed")
-needs_examples = pytest.mark.skipif(
-    not _examples_available(),
-    reason="libSFX examples/ not bundled",
-)
+        pytest.skip("libSFX examples/ not bundled")
 
 
 def test_cli_help_exits_zero():
@@ -60,9 +57,7 @@ def test_cli_no_args_errors():
     assert r.returncode != 0
 
 
-@libsfx
-@needs_examples
-def test_cli_scaffold_and_info(tmp_path, capsys):
+def test_cli_scaffold_and_info(examples_dir, tmp_path, capsys):
     dest = tmp_path / "demo"
     rc = main(["libsfx", "scaffold", str(dest), "--template", "Template"])
     assert rc == 0
@@ -75,9 +70,7 @@ def test_cli_scaffold_and_info(tmp_path, capsys):
     assert str(dest) in out
 
 
-@libsfx
-@needs_examples
-def test_cli_build_and_clean(tmp_path):
+def test_cli_build_and_clean(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     main(["libsfx", "scaffold", str(dest)])
 
@@ -93,9 +86,7 @@ def test_cli_build_and_clean(tmp_path):
     assert not list(dest.glob("*.sfc"))
 
 
-@libsfx
-@needs_examples
-def test_cli_build_with_debug_flag(tmp_path):
+def test_cli_build_with_debug_flag(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     main(["libsfx", "scaffold", str(dest)])
     rc = main(["libsfx", "build", str(dest), "--debug", "2"])

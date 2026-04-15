@@ -28,14 +28,14 @@ build-backend = "setuptools.build_meta"
 packages = ["retrotool_xdelta"]
 
 [tool.setuptools.package-data]
-retrotool_xdelta = ["bin/*"]
+retrotool_xdelta = ["bin/*", "licenses/*"]
 
 [tool.cibuildwheel]
 skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-all = "yum install -y gcc make autoconf automake libtool || apt-get update && apt-get install -y gcc make autoconf automake libtool"
+before-all = "yum install -y gcc make autoconf automake libtool || { apt-get update && apt-get install -y gcc make autoconf automake libtool; }"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]

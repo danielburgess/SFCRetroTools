@@ -225,6 +225,25 @@ def write_xdelta(
 
 # ---- driver ---------------------------------------------------------------
 
+def _assert_header_match(a: Path, b: Path) -> None:
+    """Both inputs to a diff must agree on SMC-header presence — otherwise
+    every record offset is shifted by 512 bytes and the patch corrupts the
+    target. The build pipeline reattaches the SMC on the modified ROM when the
+    original had one, so the contract here is "both have it or neither does"."""
+    from retrotool.core.rom import SMC_HEADER_SIZE
+    def _has_smc(p: Path) -> bool:
+        if not p.exists():
+            return False
+        return p.stat().st_size % 0x400 == SMC_HEADER_SIZE
+    a_hdr, b_hdr = _has_smc(a), _has_smc(b)
+    if a_hdr != b_hdr:
+        raise DiffError(
+            f"SMC-header mismatch between diff inputs: "
+            f"{a} (header={a_hdr}) vs {b} (header={b_hdr}). "
+            f"Strip the header from both sides before diffing."
+        )
+
+
 def write_diff(
     kind: str,
     *,
@@ -238,6 +257,7 @@ def write_diff(
     kind = kind.lower()
     if out_path is None:
         out_path = modified_path.with_suffix(modified_path.suffix + f".{kind}")
+    _assert_header_match(Path(original_path), Path(modified_path))
     if kind == "ips":
         return write_ips(original_path.read_bytes(), modified_path.read_bytes(), out_path)
     if kind == "xdelta":

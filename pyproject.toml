@@ -21,12 +21,23 @@ classifiers = [
 ]
 dependencies = [
     "chardet>=5.2.0",
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]
 # libsfx — full Optiroc SNES toolchain (libSFX + ca65 + SuperFamiconv +
 # SuperFamicheck + brrtools + lz4 + make_breakpoints).
 libsfx = ["retrotool-libsfx>=0.1.0"]
+# asar — SNES assembler (LGPL-3.0-or-later binary bundled in the wheel).
+asar = ["retrotool-asar>=0.1.0"]
+# xdelta — binary delta patcher (Apache-2.0 binary bundled in the wheel).
+xdelta = ["retrotool-xdelta>=0.1.0"]
+# all — every bundled-binary wheel at once.
+all = [
+    "retrotool-libsfx>=0.1.0",
+    "retrotool-asar>=0.1.0",
+    "retrotool-xdelta>=0.1.0",
+]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

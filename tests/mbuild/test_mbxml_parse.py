@@ -236,6 +236,17 @@ def test_migrate_mbxml_string_rewrites_legacy_elements():
     ]
 
 
+def test_script_table_and_table_file_attrs_equivalent():
+    """H8 regression — schema declares `table-file`, reader looked up `table`.
+    Both spellings must produce the same `Section.table`."""
+    xml_a = '<build><script file="s.bin" offset="0" table="t.tbl"/></build>'
+    xml_b = '<build><script file="s.bin" offset="0" table-file="t.tbl"/></build>'
+    sec_a = parse_mbxml_string(xml_a).sections[0]
+    sec_b = parse_mbxml_string(xml_b).sections[0]
+    assert sec_a.table == PurePosixPath("t.tbl")
+    assert sec_b.table == PurePosixPath("t.tbl")
+
+
 def test_migrate_mbxml_in_place_creates_backup(tmp_path):
     src = tmp_path / "build.mbxml"
     src.write_text('<build><lzi file="a" offset="0" lztype="lzss-zamn"/></build>')

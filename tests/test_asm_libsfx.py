@@ -13,50 +13,36 @@ from retrotool.asm.libsfx import (
 )
 from retrotool.rom.header import verify_rom
 
-_HAS_LIBSFX = False
-try:
-    import retrotool_libsfx  # noqa: F401
-    _HAS_LIBSFX = True
-except ImportError:
-    pass
-
-libsfx = pytest.mark.skipif(not _HAS_LIBSFX, reason="retrotool_libsfx not installed")
+@pytest.fixture
+def libsfx_wheel():
+    pytest.importorskip("retrotool_libsfx")
 
 
-def _examples_available() -> bool:
+@pytest.fixture
+def examples_dir(libsfx_wheel):
+    """Skip at call time if bundled libSFX examples/ isn't resolvable —
+    runtime check so the autouse toolchain-cache reset can flip the result.
+    """
     from retrotool import _toolchain
     try:
-        _toolchain.libsfx_examples()
-        return True
+        return _toolchain.libsfx_examples()
     except Exception:
-        return False
+        pytest.skip("libSFX examples/ not bundled in this retrotool-libsfx install")
 
 
-needs_examples = pytest.mark.skipif(
-    not _examples_available(),
-    reason="libSFX examples/ not bundled in this retrotool-libsfx install",
-)
-
-
-@libsfx
-@needs_examples
-def test_scaffold_template(tmp_path):
+def test_scaffold_template(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     scaffold_libsfx_project(dest, "Template")
     assert (dest / "Template.s").exists()
     assert (dest / "project.toml").exists()
 
 
-@libsfx
-@needs_examples
-def test_scaffold_rejects_unknown_template(tmp_path):
+def test_scaffold_rejects_unknown_template(examples_dir, tmp_path):
     with pytest.raises(FileNotFoundError):
         scaffold_libsfx_project(tmp_path / "x", "DoesNotExist")
 
 
-@libsfx
-@needs_examples
-def test_scaffold_rejects_nonempty_dest(tmp_path):
+def test_scaffold_rejects_nonempty_dest(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     dest.mkdir()
     (dest / "existing.txt").write_text("hi")
@@ -64,9 +50,7 @@ def test_scaffold_rejects_nonempty_dest(tmp_path):
         scaffold_libsfx_project(dest, "Template")
 
 
-@libsfx
-@needs_examples
-def test_build_template_produces_valid_rom(tmp_path):
+def test_build_template_produces_valid_rom(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     scaffold_libsfx_project(dest, "Template")
     proj = LibSFXProject.discover(dest)
@@ -80,9 +64,7 @@ def test_build_template_produces_valid_rom(tmp_path):
     assert result.breakpoints is None
 
 
-@libsfx
-@needs_examples
-def test_build_debug_emits_sym_map_bp(tmp_path):
+def test_build_debug_emits_sym_map_bp(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     scaffold_libsfx_project(dest, "Template")
     proj = LibSFXProject.discover(dest)
@@ -95,9 +77,7 @@ def test_build_debug_emits_sym_map_bp(tmp_path):
     assert result.breakpoints and result.breakpoints.exists()
 
 
-@libsfx
-@needs_examples
-def test_build_is_reproducible(tmp_path):
+def test_build_is_reproducible(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     scaffold_libsfx_project(dest, "Template")
     proj = LibSFXProject.discover(dest)
@@ -108,9 +88,7 @@ def test_build_is_reproducible(tmp_path):
     assert hashlib.sha256(first).hexdigest() == hashlib.sha256(second).hexdigest()
 
 
-@libsfx
-@needs_examples
-def test_discover_reads_project_toml(tmp_path):
+def test_discover_reads_project_toml(examples_dir, tmp_path):
     dest = tmp_path / "demo"
     scaffold_libsfx_project(dest, "Template")
     (dest / "project.toml").write_text(

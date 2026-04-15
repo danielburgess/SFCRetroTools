@@ -151,9 +151,34 @@ def build_toolchain() -> None:
     _copy_libsfx_examples()
 
 
+def _copy_licenses() -> None:
+    """Collect license files for each bundled toolchain component.
+    libSFX (MIT), superfamiconv (MIT), superfamicheck (MIT), brrtools (MIT),
+    lz4 (BSD-2-Clause + GPLv2 for cli), cc65 (zlib)."""
+    lic_dir = HERE / "retrotool_libsfx" / "licenses"
+    lic_dir.mkdir(parents=True, exist_ok=True)
+    sources = [
+        ("libSFX", LIBSFX),
+        ("superfamiconv", TOOLS / "superfamiconv"),
+        ("superfamicheck", TOOLS / "superfamicheck"),
+        ("brrtools", TOOLS / "brrtools"),
+        ("lz4", TOOLS / "lz4"),
+        ("cc65", TOOLS / "cc65"),
+    ]
+    for prefix, root in sources:
+        if not root.exists():
+            continue
+        for name in ("LICENSE", "LICENSE.txt", "COPYING", "COPYING.txt", "license.txt", "README.md"):
+            src = root / name
+            if src.exists():
+                shutil.copy2(src, lic_dir / f"{prefix}-{name}")
+
+
 class BuildPyWithToolchain(build_py):
     def run(self):
-        build_toolchain()
+        if not os.environ.get("RETROTOOL_SKIP_NATIVE_BUILD"):
+            build_toolchain()
+            _copy_licenses()
         super().run()
 
 

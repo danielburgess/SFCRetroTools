@@ -210,7 +210,7 @@ def test_script_handler_basic(tmp_path):
     out = tmp_path / "out.sfc"
     build(spec, source_root=tmp_path, out_path=out, original_rom=rom_path)
     written = out.read_bytes()[0x700:0x70C]
-    assert written.startswith(b"HELLO\x00WORLD\x00")
+    assert written == b"HELLO\x00WORLD\x00"
 
 
 # ---- only/skip filters ----------------------------------------------------

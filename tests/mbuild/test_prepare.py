@@ -61,8 +61,8 @@ def test_parallel_prepare_serial_mode_assigns_prepared(tmp_path):
     ])
     n = parallel_prepare(spec, tmp_path, max_workers=1)
     assert n == 1
-    assert hasattr(spec.sections[0], "_prepared")
-    assert not hasattr(spec.sections[1], "_prepared")
+    assert spec.sections[0]._prepared is not None
+    assert spec.sections[1]._prepared is None
 
 
 def test_build_with_parallel_serial_matches_non_parallel(tmp_path):
