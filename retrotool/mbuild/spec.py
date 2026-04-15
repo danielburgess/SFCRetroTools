@@ -116,6 +116,9 @@ class BuildSpec:
     # Top-level freespace ranges (PC half-open) shared across handlers that
     # need overflow allocation. Each pair is [lo, hi).
     freespace: list[tuple[int, int]] = field(default_factory=list)
+    # Global label registry populated from `[[mbuild.labels]]`. Sections may
+    # also register labels dynamically via `export-label=`.
+    labels: dict[str, int] = field(default_factory=dict)
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)

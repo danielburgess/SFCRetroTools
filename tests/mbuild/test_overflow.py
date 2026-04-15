@@ -120,3 +120,17 @@ def test_inline_redirect_rejects_too_small_budget():
     alloc = FreespaceAllocator.from_pairs([(0, 0x100)])
     with pytest.raises(OverflowError, match="stub"):
         s.pack(Entry("e", b"x" * 10, max_inline=4), alloc)
+
+
+def test_inline_redirect_defer_pointer_emits_fixup():
+    from retrotool.mbuild.overflow import PackFixup
+    alloc = FreespaceAllocator.from_pairs([(0x30000, 0x40000)])
+    s = InlineRedirectStrategy(defer_pointer=True)
+    encoded = b"\x10ABCDEFGHIJ"  # 11 bytes
+    p = s.pack(Entry("e", encoded, max_inline=6, original_offset=0x1000), alloc)
+    assert p.overflow_used
+    assert p.inline[1:3] == b"\xFF\xC0"
+    # placeholder, not the real ptr
+    assert p.inline[3:6] == b"\xFF\xFF\xFF"
+    # fixup points at the 3-byte slot and the allocated tail
+    assert p.fixups == [PackFixup(inline_offset=3, target_pc=0x30000)]

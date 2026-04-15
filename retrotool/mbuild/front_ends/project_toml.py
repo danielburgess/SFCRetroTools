@@ -157,6 +157,21 @@ def parse_project_toml_dict(
                 raise SchemaError(f"[mbuild].freespace[{i}] invalid range {pair!r}")
             spec.freespace.append((lo, hi))
 
+    raw_labels = mb.get("labels", [])
+    if raw_labels:
+        if not isinstance(raw_labels, list):
+            raise SchemaError("[[mbuild.labels]] must be an array of tables")
+        for i, lab in enumerate(raw_labels):
+            if not isinstance(lab, dict):
+                raise SchemaError(f"[[mbuild.labels]][{i}] must be a table")
+            name = lab.get("name")
+            if not isinstance(name, str) or not name:
+                raise SchemaError(f"[[mbuild.labels]][{i}] missing name=")
+            at = _coerce_offset(lab.get("at"), f"[[mbuild.labels]][{i}].at")
+            if at is None:
+                raise SchemaError(f"[[mbuild.labels]][{i}] missing at=")
+            spec.labels[name] = at
+
     raw_sections = mb.get("sections", [])
     if not isinstance(raw_sections, list):
         raise SchemaError("[[mbuild.sections]] must be an array of tables")
