@@ -64,8 +64,8 @@ def test_rep_writes_at_offset(tmp_path):
     result = build(spec, source_root=tmp_path, out_path=out, original_rom=rom_path)
     body = out.read_bytes()
     assert body[0x100:0x104] == b"\xAA\xBB\xCC\xDD"
-    assert result.sections[0].write.offset == 0x100
-    assert result.sections[0].write.length == 4
+    assert result.sections[0].write[0].offset == 0x100
+    assert result.sections[0].write[0].length == 4
 
 
 def test_rep_refuses_growth(tmp_path):

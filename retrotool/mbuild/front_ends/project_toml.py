@@ -144,6 +144,19 @@ def parse_project_toml_dict(
         source_path=PurePosixPath(source_path.as_posix()) if source_path else None,
     )
 
+    fs = mb.get("freespace", [])
+    if fs:
+        if not isinstance(fs, list):
+            raise SchemaError("[mbuild].freespace must be a list of [lo, hi] pairs")
+        for i, pair in enumerate(fs):
+            if not (isinstance(pair, list) and len(pair) == 2):
+                raise SchemaError(f"[mbuild].freespace[{i}] must be [lo, hi]")
+            lo = _coerce_offset(pair[0], f"[mbuild].freespace[{i}][0]")
+            hi = _coerce_offset(pair[1], f"[mbuild].freespace[{i}][1]")
+            if lo is None or hi is None or hi <= lo:
+                raise SchemaError(f"[mbuild].freespace[{i}] invalid range {pair!r}")
+            spec.freespace.append((lo, hi))
+
     raw_sections = mb.get("sections", [])
     if not isinstance(raw_sections, list):
         raise SchemaError("[[mbuild.sections]] must be an array of tables")
@@ -202,6 +215,26 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
     codec = entry.get("codec")
     grow = entry.get("grow")
 
+    fallback_table = (
+        _coerce_path(entry["fallback-table"], f"{field_prefix}.fallback-table")
+        if "fallback-table" in entry else None
+    )
+    word_wrap = entry.get("word-wrap")
+    if word_wrap is not None:
+        if not isinstance(word_wrap, dict):
+            raise SchemaError(f"{field_prefix}.word-wrap must be a table")
+        ww = {}
+        if "line-width" in word_wrap:
+            ww["line_width"] = _coerce_int(word_wrap["line-width"], f"{field_prefix}.word-wrap.line-width")
+        if "max-lines" in word_wrap:
+            ww["max_lines"] = _coerce_int(word_wrap["max-lines"], f"{field_prefix}.word-wrap.max-lines")
+        if "entries" in word_wrap:
+            ww["entries"] = word_wrap["entries"]
+        word_wrap = ww
+    overflow = entry.get("overflow")
+    if overflow is not None and not isinstance(overflow, dict):
+        raise SchemaError(f"{field_prefix}.overflow must be a table")
+
     return Section(
         kind=kind,
         offset=offset,
@@ -217,6 +250,12 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
         grow=grow,
         dedupe=bool(entry.get("dedupe", False)),
         condition=entry.get("if"),
+        pointer_size=_coerce_int(entry.get("pointer-size"), f"{field_prefix}.pointer-size"),
+        terminator=_coerce_int(entry.get("terminator"), f"{field_prefix}.terminator"),
+        fallback_table=fallback_table,
+        word_wrap=word_wrap,
+        textbuf_limit=_coerce_int(entry.get("textbuf-limit"), f"{field_prefix}.textbuf-limit"),
+        overflow=overflow,
         attrs={k: str(v) for k, v in entry.items()},
         source=f"{source}:sections[{index}]",
         original_kind=None,

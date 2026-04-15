@@ -232,3 +232,51 @@ def test_include_cycle_detected(tmp_path):
     )
     with pytest.raises(SchemaError, match="cycle"):
         parse_project_toml(tmp_path / "a.toml")
+
+
+def test_parse_script_section_extras(tmp_path):
+    toml_text = textwrap.dedent("""
+        [mbuild]
+        original = "base.sfc"
+        freespace = [[0x230000, 0x234000], [0x234000, 0x238000]]
+
+        [[mbuild.sections]]
+        kind = "script"
+        file = "scene-desc-name.txt"
+        table = "eng.tbl"
+        fallback-table = "jap.tbl"
+        pointer-table = 0x111EE3
+        pointer-size = 2
+        count = 158
+        terminator = 0x00
+        textbuf-limit = 0x1F0
+        word-wrap = { line-width = 26, max-lines = 6, entries = "0-56" }
+
+        [mbuild.sections.overflow]
+        strategy = "inline-redirect"
+        marker = [0xFF, 0xC0]
+        splitter = "split-at-last-marker-byte"
+        splitter-arg = 0x10
+    """)
+    (tmp_path / "project.toml").write_text(toml_text, encoding="utf-8")
+    spec = parse_project_toml(tmp_path / "project.toml")
+    assert spec.freespace == [(0x230000, 0x234000), (0x234000, 0x238000)]
+    s = spec.sections[0]
+    assert s.kind == SectionKind.SCRIPT
+    assert s.pointer_table == 0x111EE3
+    assert s.pointer_size == 2
+    assert s.count == 158
+    assert s.terminator == 0x00
+    assert s.textbuf_limit == 0x1F0
+    assert s.fallback_table == PurePosixPath("jap.tbl")
+    assert s.word_wrap == {"line_width": 26, "max_lines": 6, "entries": "0-56"}
+    assert s.overflow["strategy"] == "inline-redirect"
+    assert s.overflow["splitter"] == "split-at-last-marker-byte"
+
+
+def test_freespace_invalid_pair(tmp_path):
+    (tmp_path / "project.toml").write_text(
+        '[mbuild]\noriginal="base.sfc"\nfreespace=[[0x100, 0x100]]\n', encoding="utf-8"
+    )
+    with pytest.raises(SchemaError, match="invalid range"):
+        parse_project_toml(tmp_path / "project.toml")
