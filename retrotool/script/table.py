@@ -10,9 +10,10 @@ class Table:
     """Ported from v0.1 retrotool/script.py. Loads .tbl, encodes/decodes bytes↔text."""
 
     def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False):
-        enc, val_map, char_map, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt = self._load_table(table_file)
+        enc, val_map, char_map, char_bytes, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt = self._load_table(table_file)
         self.__val_map = val_map
         self.__chr_map = char_map
+        self.__chr_bytes = char_bytes
         self.__ctrl_lengths = ctrl_lengths
         self.__ctrl_types = ctrl_types
         self.__ctrl_prefix = ctrl_prefix
@@ -42,6 +43,11 @@ class Table:
         enc = enc if enc is not None else self.detect_encoding(table_file)
         val_map: dict[int, str] = {}
         char_map: dict[str, int] = {}
+        # Sibling map preserving each hex-code's declared byte width. The
+        # `char_map: int` path silently drops leading-zero bytes on
+        # serialization (e.g. `000A=X` → `0x0A` → b'\x0A', not b'\x00\x0A').
+        # Encoders should prefer `char_bytes` for byte-faithful output.
+        char_bytes: dict[str, bytes] = {}
         ctrl_lengths: dict[int, int] = {}
         ctrl_types: dict[int, str] = {}
         ctrl_prefix: int = 0xFF
@@ -110,25 +116,28 @@ class Table:
                                         self._set_maps(
                                             prep_val.replace('%%', self.hex(e)),
                                             prep_ch.replace('%%', self.hex(e)),
-                                            val_map, char_map,
+                                            val_map, char_map, char_bytes,
                                         )
                                 else:
-                                    self._set_maps(prep_val, prep_ch, val_map, char_map)
+                                    self._set_maps(prep_val, prep_ch, val_map, char_map, char_bytes)
                         else:
-                            self._set_maps(val, ch, val_map, char_map)
+                            self._set_maps(val, ch, val_map, char_map, char_bytes)
                 except Exception as ex:
                     print(f"ERROR: {ex!r}")
                     err_count += 1
                 cnt += 1
-        return enc, val_map, char_map, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt
+        return enc, val_map, char_map, char_bytes, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt
 
     @staticmethod
-    def _set_maps(in_val, in_ch, val_map, char_map):
+    def _set_maps(in_val, in_ch, val_map, char_map, char_bytes=None):
         dec_val = int(in_val, 16)
         if dec_val not in val_map:
             val_map[dec_val] = in_ch
         if in_ch not in char_map:
             char_map[in_ch] = dec_val
+        if char_bytes is not None and in_ch not in char_bytes:
+            hex_str = in_val if len(in_val) % 2 == 0 else '0' + in_val
+            char_bytes[in_ch] = bytes.fromhex(hex_str)
 
     @property
     def encoding(self) -> Optional[str]:
@@ -145,6 +154,16 @@ class Table:
     @property
     def char_map(self) -> dict[str, int]:
         return self.__chr_map
+
+    @property
+    def char_bytes(self) -> dict[str, bytes]:
+        """char → raw bytes preserving the declared hex-code byte width.
+
+        Prefer this over `char_map` for encoders: `char_map` stores the
+        value as `int`, which silently drops leading-zero bytes when
+        serialized (e.g. `000A=X` → `0x0A` → one byte out, not two).
+        """
+        return self.__chr_bytes
 
     @property
     def ctrl_prefix(self) -> int:
@@ -237,9 +256,23 @@ class Table:
         final = ''
         i = 0
         n = len(bin_data)
+        ctrl_prefix = self.__ctrl_prefix
+        ctrl_lengths = self.__ctrl_lengths
         while i <= n + 1:
             if i >= n:
                 break
+            # Control sequence: emit the full declared span as a single
+            # `[HH..]` hex escape so round-trip preserves the ctrl
+            # payload. `find_entry_end` already walks ctrls this way;
+            # the plain decode path used to ignore them, splitting
+            # payload bytes across hex escape + literal char decodes.
+            if bin_data[i] == ctrl_prefix and i + 1 < n:
+                cmd = bin_data[i + 1]
+                span = ctrl_lengths.get(cmd, 3)
+                end = min(i + span, n)
+                final += self.hex_dump(bin_data[i:end])
+                i = end
+                continue
             length = max_bytes
             char = None
             found = False

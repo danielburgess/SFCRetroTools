@@ -75,16 +75,22 @@ def encode_text(
     fixups: list of `ScriptFixup` records (entry refs or global-label refs).
     labels: dict of label_name → byte_offset within encoded (for [label:NAME]).
     """
-    char_map = table.char_map
-    fb_map = fallback_table.char_map if fallback_table else {}
+    # Prefer `char_bytes` (preserves declared hex-code byte width). Fall
+    # back to `char_map` + `_int_to_bytes_be` only if a table instance
+    # predates the `char_bytes` addition.
+    char_bytes = getattr(table, 'char_bytes', None) or {
+        k: _int_to_bytes_be(v) for k, v in table.char_map.items()
+    }
+    fb_bytes: dict[str, bytes]
+    if fallback_table is not None:
+        fb_bytes = getattr(fallback_table, 'char_bytes', None) or {
+            k: _int_to_bytes_be(v) for k, v in fallback_table.char_map.items()
+        }
+    else:
+        fb_bytes = {}
 
-    lookup = sorted(
-        ((ch, _int_to_bytes_be(val)) for ch, val in char_map.items()),
-        key=lambda x: len(x[0]),
-        reverse=True,
-    )
-    max_key_len = max((len(k) for k, _ in lookup), default=1)
-    fb_max_key_len = max((len(k) for k in fb_map), default=1) if fb_map else 1
+    max_key_len = max((len(k) for k in char_bytes), default=1)
+    fb_max_key_len = max((len(k) for k in fb_bytes), default=1) if fb_bytes else 1
 
     result = bytearray()
     fixups: list[ScriptFixup] = []
@@ -115,9 +121,9 @@ def encode_text(
             # Multi-char primary table matches (length >= 2)
             for length in range(min(max_key_len, n - i), 1, -1):
                 substr = text_str[i:i + length]
-                val = char_map.get(substr)
-                if val is not None:
-                    result.extend(_int_to_bytes_be(val))
+                raw = char_bytes.get(substr)
+                if raw is not None:
+                    result.extend(raw)
                     i += length
                     matched = True
                     break
@@ -162,34 +168,34 @@ def encode_text(
                         matched = True
 
             # Fallback multi-char starting with '['
-            if not matched and fb_map:
+            if not matched and fb_bytes:
                 for length in range(min(fb_max_key_len, n - i), 1, -1):
                     substr = text_str[i:i + length]
                     if not substr.startswith('['):
                         continue
-                    val = fb_map.get(substr)
-                    if val is not None:
-                        result.extend(_int_to_bytes_be(val))
+                    raw = fb_bytes.get(substr)
+                    if raw is not None:
+                        result.extend(raw)
                         i += length
                         matched = True
                         break
 
             # Single '[' from primary
             if not matched:
-                val = char_map.get('[')
-                if val is not None:
-                    result.extend(_int_to_bytes_be(val))
+                raw = char_bytes.get('[')
+                if raw is not None:
+                    result.extend(raw)
                     i += 1
                     matched = True
         else:
             combined_max = max(max_key_len, fb_max_key_len)
             for length in range(min(combined_max, n - i), 0, -1):
                 substr = text_str[i:i + length]
-                val = char_map.get(substr)
-                if val is None and fb_map:
-                    val = fb_map.get(substr)
-                if val is not None:
-                    result.extend(_int_to_bytes_be(val))
+                raw = char_bytes.get(substr)
+                if raw is None and fb_bytes:
+                    raw = fb_bytes.get(substr)
+                if raw is not None:
+                    result.extend(raw)
                     i += length
                     matched = True
                     break

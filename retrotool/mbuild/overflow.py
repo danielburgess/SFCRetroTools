@@ -110,11 +110,20 @@ class PackFixup:
 
 @dataclass
 class Packed:
-    """Result of packing one entry."""
+    """Result of packing one entry.
+
+    `source_split` is how many bytes of `entry.encoded` were consumed by the
+    inline portion. Callers mapping per-entry fixup offsets (that originated
+    inside `entry.encoded`) from source-offset to final rom-PC use this to
+    decide whether a given source offset landed in the inline write or in
+    the first tail write. Strategies that don't split set it to
+    `len(entry.encoded)` (everything is inline).
+    """
     inline: bytes
     tails: list[TailWrite] = field(default_factory=list)
     overflow_used: bool = False
     fixups: list[PackFixup] = field(default_factory=list)
+    source_split: int = 0
 
 
 class OverflowStrategy(ABC):
@@ -160,14 +169,15 @@ class FailStrategy(OverflowStrategy):
                 f"{entry.id}: encoded {len(entry.encoded)}b > max_inline "
                 f"{entry.max_inline}b (strategy=fail)"
             )
-        return Packed(inline=entry.encoded)
+        return Packed(inline=entry.encoded, source_split=len(entry.encoded))
 
 
 class TruncateStrategy(OverflowStrategy):
     name = "truncate"
 
     def pack(self, entry: Entry, allocator: Optional[FreespaceAllocator]) -> Packed:
-        return Packed(inline=entry.encoded[:entry.max_inline])
+        inline = entry.encoded[:entry.max_inline]
+        return Packed(inline=inline, source_split=len(inline))
 
 
 class InlineRedirectStrategy(OverflowStrategy):
@@ -266,6 +276,7 @@ class InlineRedirectStrategy(OverflowStrategy):
                 tails=[TailWrite(offset=tail_pc, data=tail)],
                 overflow_used=True,
                 fixups=[PackFixup(inline_offset=ptr_off, target_pc=tail_pc)],
+                source_split=split,
             )
         ptr = self.pointer_encoder(tail_pc)
         if len(ptr) != self.pointer_size:
@@ -278,6 +289,7 @@ class InlineRedirectStrategy(OverflowStrategy):
             inline=inline,
             tails=[TailWrite(offset=tail_pc, data=tail)],
             overflow_used=True,
+            source_split=split,
         )
 
 
@@ -305,6 +317,257 @@ def _default_pc_to_lorom1_le(pc: int) -> bytes:
     addr = (pc & 0x7FFF) | 0x8000
     snes = (bank << 16) | addr
     return bytes([snes & 0xFF, (snes >> 8) & 0xFF, (snes >> 16) & 0xFF])
+
+
+# ---- pointer-encoder registry --------------------------------------------
+#
+# Named callables that turn a PC offset into the bytes a game's reader
+# interprets as an address. Strategies and handler fixup resolution pull
+# from here so config files can stay host/game-agnostic.
+
+PointerEncoder = Callable[[int], bytes]
+
+_POINTER_ENCODERS: dict[str, PointerEncoder] = {}
+
+
+def register_pointer_encoder(name: str, fn: PointerEncoder) -> None:
+    _POINTER_ENCODERS[name] = fn
+
+
+def get_pointer_encoder(name: str) -> PointerEncoder:
+    try:
+        return _POINTER_ENCODERS[name]
+    except KeyError as e:
+        raise KeyError(
+            f"unknown pointer-encoder {name!r}. "
+            f"Known: {sorted(_POINTER_ENCODERS)}"
+        ) from e
+
+
+def list_pointer_encoders() -> list[str]:
+    return sorted(_POINTER_ENCODERS)
+
+
+def _pc_to_snes_lorom1_24le(pc: int) -> bytes:
+    """24-bit LoROM1 SNES address, little-endian. bank = ((pc>>15)&0x7F)|0x80."""
+    return _default_pc_to_lorom1_le(pc)
+
+
+def _pc_to_snes_lorom0_24le(pc: int) -> bytes:
+    """24-bit LoROM0 SNES address, little-endian. bank = (pc>>15)&0x7F (no $80 bit)."""
+    bank = (pc >> 15) & 0x7F
+    addr = (pc & 0x7FFF) | 0x8000
+    snes = (bank << 16) | addr
+    return bytes([snes & 0xFF, (snes >> 8) & 0xFF, (snes >> 16) & 0xFF])
+
+
+def _pc_to_hirom_24le(pc: int) -> bytes:
+    """24-bit HiROM SNES address, little-endian. bank = (pc>>16)|0xC0."""
+    bank = ((pc >> 16) & 0x3F) | 0xC0
+    addr = pc & 0xFFFF
+    snes = (bank << 16) | addr
+    return bytes([snes & 0xFF, (snes >> 8) & 0xFF, (snes >> 16) & 0xFF])
+
+
+register_pointer_encoder("snes-lorom1-24le", _pc_to_snes_lorom1_24le)
+register_pointer_encoder("snes-lorom0-24le", _pc_to_snes_lorom0_24le)
+register_pointer_encoder("snes-hirom-24le", _pc_to_hirom_24le)
+
+
+# ---- splitter registry ---------------------------------------------------
+#
+# A splitter is a factory: `make(arg) -> (encoded, budget) -> split_index`.
+# `arg` comes from config (`splitter-arg`) and is splitter-specific.
+
+SplitterFactory = Callable[..., Callable[[bytes, int], int]]
+
+_SPLITTERS: dict[str, SplitterFactory] = {}
+
+
+def register_splitter(name: str, factory: SplitterFactory) -> None:
+    _SPLITTERS[name] = factory
+
+
+def build_splitter(name: str, arg: object = None, ctx: Optional[dict] = None) -> Callable[[bytes, int], int]:
+    """Build splitter by name. `ctx` is host-supplied context (e.g. table
+    `ctrl_lengths`). Factories ignore kwargs they don't need."""
+    factory = get_splitter(name)
+    try:
+        return factory(arg, ctx=ctx or {})
+    except TypeError:
+        # Back-compat: factories pre-dating the `ctx` kwarg.
+        return factory(arg)
+
+
+def get_splitter(name: str) -> SplitterFactory:
+    try:
+        return _SPLITTERS[name]
+    except KeyError as e:
+        raise KeyError(
+            f"unknown splitter {name!r}. Known: {sorted(_SPLITTERS)}"
+        ) from e
+
+
+def list_splitters() -> list[str]:
+    return sorted(_SPLITTERS)
+
+
+def _splitter_greedy_factory(arg: object, *, ctx: Optional[dict] = None) -> Callable[[bytes, int], int]:
+    """Default: consume the full budget."""
+    return lambda encoded, budget: budget
+
+
+def _splitter_at_last_marker_byte_factory(arg: object, *, ctx: Optional[dict] = None) -> Callable[[bytes, int], int]:
+    if arg is None:
+        raise ValueError("splitter 'at-last-marker-byte' requires splitter-arg (byte value)")
+    if not isinstance(arg, int):
+        raise ValueError("splitter-arg for 'at-last-marker-byte' must be an int")
+    return split_at_last_marker_byte(arg)
+
+
+def split_ctrl_aware(
+    ctrl_lengths: dict,
+    *,
+    default_length: int = 2,
+    terminator: Optional[int] = 0x00,
+    event_script: bool = False,
+    text_enter: int = 0x10,
+) -> Callable[[bytes, int], int]:
+    """Latest safe byte-boundary split that respects multi-byte FF control
+    codes. Mirrors LM3 `_find_safe_split`: walks `encoded`, tracking
+    last position that lands between complete tokens. For non-event data,
+    stops at the first `terminator` (entry end); for event-script data,
+    returns the last safe split inside a text window ([text_enter]..[term]).
+    """
+    def _splitter(encoded: bytes, budget: int) -> int:
+        if budget <= 0:
+            return 0
+        pos = 0
+        last_safe = 0
+        in_text = False
+        last_text_safe = 0
+        n = len(encoded)
+        while pos < n:
+            b = encoded[pos]
+            if b == 0xFF and pos + 1 < n:
+                sub = encoded[pos + 1]
+                cl = ctrl_lengths.get(sub, default_length)
+                if pos + cl <= budget:
+                    last_safe = pos + cl
+                    if event_script and in_text:
+                        last_text_safe = pos + cl
+                    pos += cl
+                else:
+                    break
+            elif terminator is not None and b == terminator:
+                if event_script:
+                    if pos + 1 <= budget:
+                        if in_text:
+                            in_text = False
+                        last_safe = pos + 1
+                        pos += 1
+                    else:
+                        break
+                else:
+                    break
+            elif event_script and b == text_enter:
+                in_text = True
+                if pos + 1 <= budget:
+                    last_safe = pos + 1
+                    pos += 1
+                else:
+                    break
+            else:
+                if pos + 1 <= budget:
+                    last_safe = pos + 1
+                    if event_script and in_text:
+                        last_text_safe = pos + 1
+                    pos += 1
+                else:
+                    break
+        return last_text_safe if event_script else last_safe
+    return _splitter
+
+
+def _splitter_ctrl_aware_factory(arg: object, *, ctx: Optional[dict] = None) -> Callable[[bytes, int], int]:
+    """Ctrl-aware splitter. Uses `ctx['ctrl_lengths']` provided by the caller
+    (handler builds it from the loaded Table). `arg` may be a dict overriding
+    `event_script`/`terminator`/`text_enter`/`default_length`.
+    """
+    ctx = ctx or {}
+    ctrl_lengths = ctx.get("ctrl_lengths") or {}
+    opts = arg if isinstance(arg, dict) else {}
+    return split_ctrl_aware(
+        ctrl_lengths,
+        default_length=int(opts.get("default-length", 2)),
+        terminator=opts.get("terminator", 0x00),
+        event_script=bool(opts.get("event-script", ctx.get("event_script", False))),
+        text_enter=int(opts.get("text-enter", 0x10)),
+    )
+
+
+register_splitter("greedy", _splitter_greedy_factory)
+register_splitter("at-last-marker-byte", _splitter_at_last_marker_byte_factory)
+register_splitter("ctrl-aware", _splitter_ctrl_aware_factory)
+
+
+# ---- config factory ------------------------------------------------------
+
+def _coerce_bytes(val: object, key: str) -> bytes:
+    if isinstance(val, (bytes, bytearray)):
+        return bytes(val)
+    if isinstance(val, list) and all(isinstance(b, int) for b in val):
+        return bytes(val)
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s.startswith("0x"):
+            s = s[2:]
+        return bytes.fromhex(s)
+    raise ValueError(f"{key}: unsupported form {val!r} (want list[int] or hex string)")
+
+
+def strategy_from_config(cfg: dict, *, splitter_ctx: Optional[dict] = None) -> OverflowStrategy:
+    """Build a strategy instance from a parsed config dict.
+
+    Supported keys (all optional except `strategy`):
+      - `strategy`         strategy name (required; e.g. 'inline-redirect')
+      - `marker`           bytes; list[int] or hex string
+      - `pointer-size`     int (default 3)
+      - `pointer-encoder`  registered name (default 'snes-lorom1-24le')
+      - `splitter`         registered name (default 'greedy')
+      - `splitter-arg`     int or other; forwarded to splitter factory
+      - `redirect-back`    bool
+      - `defer-pointer`    bool (default True — lets the handler resolve the
+                           pointer after every entry is placed)
+
+    Strategies not needing these just look them up in the registry.
+    """
+    if not isinstance(cfg, dict):
+        raise ValueError(f"overflow config must be a dict, got {type(cfg).__name__}")
+    name = cfg.get("strategy")
+    if not name:
+        raise ValueError("overflow config: 'strategy' is required")
+
+    # Built-in strategies that accept inline/keyword params get constructed
+    # here; anything else falls back to the name-keyed registry singleton.
+    if name == "inline-redirect":
+        marker = _coerce_bytes(cfg.get("marker", b"\xFF\xC0"), "overflow.marker")
+        pointer_size = int(cfg.get("pointer-size", 3))
+        enc_name = cfg.get("pointer-encoder", "snes-lorom1-24le")
+        pointer_encoder = get_pointer_encoder(str(enc_name))
+        split_name = cfg.get("splitter", "greedy")
+        splitter = build_splitter(str(split_name), cfg.get("splitter-arg"), ctx=splitter_ctx)
+        redirect_back = bool(cfg.get("redirect-back", False))
+        defer_pointer = bool(cfg.get("defer-pointer", True))
+        return InlineRedirectStrategy(
+            marker=marker,
+            pointer_size=pointer_size,
+            pointer_encoder=pointer_encoder,
+            splitter=splitter,
+            redirect_back=redirect_back,
+            defer_pointer=defer_pointer,
+        )
+    return get(name)
 
 
 # Auto-register built-ins at import time.

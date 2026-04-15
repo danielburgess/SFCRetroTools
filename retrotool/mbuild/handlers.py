@@ -398,37 +398,226 @@ def handle_script(
     ptr_tbl_len = count * ptr_size
     data_start = ptr_tbl_pc + ptr_tbl_len
 
-    # TODO: overflow. First target (scene-desc-name) has none configured.
+    # Overflow strategy (optional). Built from `section.overflow` via the
+    # registry — no game-specific bytes leak into handler code. Entries that
+    # fit their source slot go inline unchanged; oversize entries are packed
+    # by the strategy (spill to freespace, inline stub, etc.).
+    from retrotool.mbuild.overflow import (
+        Entry as _OverflowEntry,
+        strategy_from_config as _strategy_from_config,
+        get_pointer_encoder as _get_pointer_encoder,
+    )
+    overflow_strategy = None
+    slot_measure = "pointer-distance"
+    _slot_tbl = None
     if section.overflow is not None:
-        raise HandlerError(
-            f"{section.source}: overflow strategy not yet wired in handle_script"
+        # Host-side splitter context (e.g. ctrl_lengths from the loaded
+        # Table) so generic splitters like `ctrl-aware` don't need the
+        # table baked into config.
+        from retrotool.script.table import Table as _SplitTable
+        _slot_tbl = _SplitTable(str(table_path))
+        splitter_ctx = {
+            "ctrl_lengths": getattr(_slot_tbl, "ctrl_lengths", {}) or {},
+        }
+        overflow_strategy = _strategy_from_config(
+            section.overflow, splitter_ctx=splitter_ctx,
         )
+        sm = section.overflow.get("slot-measure")
+        if sm:
+            slot_measure = str(sm)
+            if slot_measure not in ("pointer-distance", "source-entry"):
+                raise HandlerError(
+                    f"{section.source}: overflow.slot-measure must be "
+                    f"'pointer-distance' or 'source-entry', got {slot_measure!r}"
+                )
+    # Snapshot source ROM data region for `source-entry` slot measurement.
+    # Captured before any writes so EN entries whose original JP bytes were
+    # shorter than the pointer slot still overflow matching LM3 semantics.
+    _source_snapshot: Optional[bytes] = None
+    if slot_measure == "source-entry":
+        _source_snapshot = bytes(rom)
+    # Pointer-encoder applied to `[HHHH@N[:label]]` and `[HHHH@@name]` fixup
+    # resolution. Defaults to SNES LoROM1 24-bit LE to match the encoder's
+    # 3-byte placeholder. Overridable via `section.overflow.pointer-encoder`.
+    fixup_pointer_encoder: Callable[[int], bytes] = _pc_to_lorom1_bytes
+    if section.overflow is not None:
+        enc_name = section.overflow.get("pointer-encoder")
+        if enc_name:
+            fixup_pointer_encoder = _get_pointer_encoder(str(enc_name))
+
+    # Sentinel passthrough. Source ROMs sometimes pad the ptr table tail with
+    # entries that decode outside the LoROM window (system-area mirrors, etc.).
+    # Those slots hold no real text; re-encoding the script bytes in their
+    # place would consume data-region space and shift every subsequent ptr.
+    # Detect by decoding the source ptr under LoROM1 — if `lorom1_to_pc` is
+    # None, carry the raw source bytes straight through into the output ptr
+    # table and skip the data write. Snapshot before any writes since handlers
+    # mutate `rom` in place.
+    from retrotool.core.address import SFCAddress, SFCAddressType
+    _ensure_room(rom, ptr_tbl_pc + ptr_tbl_len)
+    src_ptr_bytes = bytes(rom[ptr_tbl_pc:ptr_tbl_pc + ptr_tbl_len])
+    bank_hi = (
+        SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
+        if ptr_size == 2 else 0
+    )
+    sentinel_raw: dict[int, bytes] = {}
+    src_pc: dict[int, int] = {}
+    zero_slot = b"\x00" * ptr_size
+    for i in range(count):
+        raw = src_ptr_bytes[i * ptr_size:(i + 1) * ptr_size]
+        if raw == zero_slot:
+            # Fresh/blank ptr table — nothing to carry through. Fall through
+            # to sequential packing.
+            continue
+        if ptr_size == 3:
+            snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
+        else:
+            snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
+        pc = SFCAddress.lorom1_to_pc(snes, verbose=False)
+        if pc is None:
+            sentinel_raw[i] = raw
+        else:
+            src_pc[i] = pc
 
     writes: list[WriteRange] = []
-    ptrs: list[int] = []
+    ptrs: list[Optional[int]] = []
     entry_pc: dict[int, int] = {}
     entry_labels_pc: dict[int, dict[str, int]] = {}
     pending: list[tuple[int, object]] = []  # (rom_pc_of_placeholder, ScriptFixup)
     seen_addrs: dict[int, int] = {}
+    # Duplicate-source-ptr dedupe. Source ROMs share one entry body across
+    # multiple ptr slots (e.g. LM3 scene-desc-name ptrs 117/118/123 all point
+    # at $B50E, a 12-byte body). Without dedupe, entry 118's body bumps to
+    # `cur` because its source slot (next distinct src_pc after $B50E) is
+    # zero-width, and the ptr table drifts. Share the first placement's PC
+    # on every later hit; skip the data write.
+    seen_src_pc: dict[int, int] = {}
+
+    def _map_source_offset(
+        source_offset: int, inline_pc: int, source_split: int,
+        tail_pc: Optional[int],
+    ) -> int:
+        """Translate a byte offset within the encoded source bytes into the
+        rom PC where that byte actually landed after packing. Offsets below
+        `source_split` landed in the inline write; anything at or above
+        landed at the start of the (first) tail write."""
+        if source_offset < source_split:
+            return inline_pc + source_offset
+        if tail_pc is None:
+            raise HandlerError(
+                f"{section.source}: fixup at source offset {source_offset} "
+                f"spilled to tail but no tail was allocated"
+            )
+        return tail_pc + (source_offset - source_split)
+
+    # Placement: honor the source ROM's per-entry PC when known. Sequential
+    # packing obliterates any unrelated data that happens to live in gaps
+    # between entries (common when a text block shares a region with
+    # sibling tables). Writing at each entry's source PC preserves those
+    # gaps untouched, giving byte-equal round-trip for unchanged scripts.
+    # If re-encoded content outgrows its source slot (next entry's PC) and
+    # no overflow strategy is configured, we fall back to sequential bump
+    # from `cur`. With an overflow strategy configured, oversize entries
+    # are routed through the strategy (inline stub + tail in freespace).
     cur = data_start
     for i, (enc, orig_addr, ent_fixups, ent_labels) in enumerate(entries):
+        if i in sentinel_raw:
+            ptrs.append(None)
+            continue
+        # Dedupe by source ptr PC: if an earlier entry already placed at
+        # this same source PC, share its output PC and skip the write.
+        if i in src_pc and src_pc[i] in seen_src_pc:
+            shared_pc = seen_src_pc[src_pc[i]]
+            entry_pc[i] = shared_pc
+            ptrs.append(shared_pc)
+            continue
         is_dup = (orig_addr is not None and orig_addr in seen_addrs
                   and enc == b"\x00")
         if is_dup:
             pc = seen_addrs[orig_addr]
+            ptrs.append(pc)
+            continue
+
+        pc = src_pc.get(i, cur)
+        # Slot end = nearest-greater src PC across all entries (not just
+        # next index). Duplicate src ptrs and non-monotonic ordering
+        # break the naive next-index scan.
+        slot_end: Optional[int] = None
+        if i in src_pc:
+            greater = [p for p in src_pc.values() if p > src_pc[i]]
+            slot_end = min(greater) if greater else None
+        max_inline = (slot_end - pc) if slot_end is not None else len(enc)
+        if slot_measure == "source-entry" and _source_snapshot is not None and _slot_tbl is not None:
+            # Walk source ROM from the source ptr's PC using ctrl-aware
+            # terminator detection; treat that length (not the raw pointer
+            # distance) as the max inline budget. Matches extraction
+            # semantics for ROMs whose original entries are shorter than
+            # the slot they occupy.
+            end = _slot_tbl.find_entry_end(_source_snapshot, pc, max_addr=slot_end)
+            max_inline = end - pc
+
+        source_split = len(enc)
+        first_tail_pc: Optional[int] = None
+        pack_fixups: list[object] = []
+
+        if overflow_strategy is not None and max_inline < len(enc):
+            # Oversize — delegate to strategy.
+            packed = overflow_strategy.pack(
+                _OverflowEntry(
+                    id=f"{section.source}[{i}]",
+                    encoded=enc,
+                    max_inline=max_inline,
+                    original_offset=pc,
+                ),
+                ctx.allocator if ctx is not None else None,
+            )
+            inline_bytes = packed.inline
+            source_split = packed.source_split
+            _ensure_room(rom, pc + len(inline_bytes))
+            rom[pc:pc + len(inline_bytes)] = inline_bytes
+            writes.append(WriteRange(offset=pc, length=len(inline_bytes)))
+            for tw in packed.tails:
+                _ensure_room(rom, tw.offset + len(tw.data))
+                rom[tw.offset:tw.offset + len(tw.data)] = tw.data
+                writes.append(WriteRange(offset=tw.offset, length=len(tw.data)))
+            if packed.tails:
+                first_tail_pc = packed.tails[0].offset
+            pack_fixups = list(packed.fixups)
         else:
-            pc = cur
+            # Source slot either fits or there's no slot constraint; also,
+            # without an overflow strategy we keep the old sequential-bump
+            # fallback so existing no-overflow configs behave unchanged.
+            if (slot_end is not None and pc + len(enc) > slot_end
+                    and overflow_strategy is None):
+                pc = cur  # overflow of source slot → sequential fallback
             _ensure_room(rom, pc + len(enc))
             rom[pc:pc + len(enc)] = enc
             writes.append(WriteRange(offset=pc, length=len(enc)))
-            entry_pc[i] = pc
-            if ent_labels:
-                entry_labels_pc[i] = {n: pc + off for n, off in ent_labels.items()}
-            for fx in ent_fixups:
-                pending.append((pc + fx.offset, fx))
-            if orig_addr is not None:
-                seen_addrs[orig_addr] = pc
-            cur += len(enc)
+
+        entry_pc[i] = pc
+        if ent_labels:
+            entry_labels_pc[i] = {
+                n: _map_source_offset(off, pc, source_split, first_tail_pc)
+                for n, off in ent_labels.items()
+            }
+        for fx in ent_fixups:
+            rom_pc_of_placeholder = _map_source_offset(
+                fx.offset, pc, source_split, first_tail_pc,
+            )
+            pending.append((rom_pc_of_placeholder, fx))
+        # Resolve strategy-returned PackFixups (e.g. inline-redirect's
+        # redirect-pointer slot) now — the tail PC is known.
+        for pf in pack_fixups:
+            _ensure_room(rom, pc + pf.inline_offset + 3)
+            ptr_bytes = fixup_pointer_encoder(pf.target_pc)
+            rom[pc + pf.inline_offset:pc + pf.inline_offset + len(ptr_bytes)] = ptr_bytes
+        if orig_addr is not None:
+            seen_addrs[orig_addr] = pc
+        if i in src_pc:
+            seen_src_pc.setdefault(src_pc[i], pc)
+        # `cur` tracks the sequential fallback cursor; only advance past the
+        # inline write (tails live in freespace, not in the data region).
+        cur = max(cur, pc + source_split)
         ptrs.append(pc)
 
     # Resolve all entry/global fixups uniformly.
@@ -454,14 +643,17 @@ def handle_script(
                         f"label not defined in target entry"
                     )
                 target_pc = target_labels[fx.label]
-        addr = _pc_to_lorom1_bytes(target_pc)
-        _ensure_room(rom, rom_pc + 3)
-        rom[rom_pc:rom_pc + 3] = addr
+        addr = fixup_pointer_encoder(target_pc)
+        _ensure_room(rom, rom_pc + len(addr))
+        rom[rom_pc:rom_pc + len(addr)] = addr
 
     # Emit pointer table.
     _ensure_room(rom, ptr_tbl_pc + ptr_tbl_len)
     for i, pc in enumerate(ptrs):
-        if ptr_size == 3:
+        if pc is None:
+            raw = sentinel_raw[i]
+            rom[ptr_tbl_pc + i * ptr_size:ptr_tbl_pc + (i + 1) * ptr_size] = raw
+        elif ptr_size == 3:
             rom[ptr_tbl_pc + i * 3:ptr_tbl_pc + i * 3 + 3] = _pc_to_lorom1_bytes(pc)
         else:
             ptr16 = _pc_to_lorom_within_bank(pc)
