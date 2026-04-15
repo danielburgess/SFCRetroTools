@@ -32,7 +32,44 @@ _CACHEABLE_KINDS = frozenset({
 })
 
 # Bumped when the cache-key schema changes; old entries are ignored on read.
-_CACHE_VERSION = "2"
+# v3: cache artifact reframed to support multi-range writes per section.
+_CACHE_VERSION = "3"
+
+# Multi-write cache artifact framing:
+#   magic  = b"RTMW"        (4 bytes)
+#   version= u8 = 1
+#   count  = u32 little-endian
+#   then `count` records of:  offset u64le, length u32le, data[length]
+_CACHE_MAGIC = b"RTMW"
+_CACHE_FRAME_VERSION = 1
+
+
+def _pack_writes(rom: bytes, writes: list[WriteRange]) -> bytes:
+    parts: list[bytes] = [_CACHE_MAGIC, bytes([_CACHE_FRAME_VERSION])]
+    parts.append(len(writes).to_bytes(4, "little"))
+    for wr in writes:
+        data = bytes(rom[wr.offset:wr.end])
+        parts.append(wr.offset.to_bytes(8, "little"))
+        parts.append(len(data).to_bytes(4, "little"))
+        parts.append(data)
+    return b"".join(parts)
+
+
+def _unpack_writes(blob: bytes) -> list[tuple[int, bytes]]:
+    if not blob.startswith(_CACHE_MAGIC):
+        raise ValueError("cache artifact missing RTMW magic")
+    pos = len(_CACHE_MAGIC)
+    ver = blob[pos]; pos += 1
+    if ver != _CACHE_FRAME_VERSION:
+        raise ValueError(f"unknown cache frame version {ver}")
+    count = int.from_bytes(blob[pos:pos + 4], "little"); pos += 4
+    out: list[tuple[int, bytes]] = []
+    for _ in range(count):
+        off = int.from_bytes(blob[pos:pos + 8], "little"); pos += 8
+        ln = int.from_bytes(blob[pos:pos + 4], "little"); pos += 4
+        out.append((off, blob[pos:pos + ln]))
+        pos += ln
+    return out
 
 
 def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
@@ -66,7 +103,10 @@ def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
 @dataclass
 class SectionResult:
     section: Section
-    write: WriteRange
+    # All byte ranges this section wrote (in emission order). A handler that
+    # emits one contiguous span yields a single-element list; multi-write
+    # handlers (e.g. the script pointer-table + inline + tails) yield many.
+    write: list[WriteRange]
     cache_hit: bool = False
 
 
@@ -219,28 +259,34 @@ def build(
             )
 
         cache_key = _section_cache_key(section, files_root) if cache else None
-        if cache and cache_key and cache.has(cache_key) and section.offset is not None:
+        if cache and cache_key and cache.has(cache_key):
             try:
                 entry = cache.get(cache_key)
-                data = entry.artifact.read_bytes()
-            except (OSError, AttributeError) as exc:
+                blob = entry.artifact.read_bytes()
+                ranges = _unpack_writes(blob)
+            except (OSError, AttributeError, ValueError) as exc:
                 raise HandlerError(
                     f"{section.source}: cached artifact unreadable for key "
                     f"{cache_key[:12]}…: {exc}"
                 ) from exc
-            end = section.offset + len(data)
-            if end > len(rom):
-                rom.extend(b"\x00" * (end - len(rom)))
-            rom[section.offset:end] = data
-            wr = WriteRange(offset=section.offset, length=len(data))
-            section_results.append(SectionResult(section=section, write=wr, cache_hit=True))
+            cached_writes: list[WriteRange] = []
+            for off, data in ranges:
+                end = off + len(data)
+                if end > len(rom):
+                    rom.extend(b"\x00" * (end - len(rom)))
+                rom[off:end] = data
+                cached_writes.append(WriteRange(offset=off, length=len(data)))
+            section_results.append(SectionResult(
+                section=section, write=cached_writes, cache_hit=True,
+            ))
             cache_hits += 1
             continue
 
-        wr = handler(rom, section, files_root)
-        section_results.append(SectionResult(section=section, write=wr))
+        raw = handler(rom, section, files_root)
+        writes: list[WriteRange] = [raw] if isinstance(raw, WriteRange) else list(raw)
+        section_results.append(SectionResult(section=section, write=writes))
         if cache and cache_key:
-            cache.put(cache_key, bytes(rom[wr.offset:wr.end]),
+            cache.put(cache_key, _pack_writes(bytes(rom), writes),
                       meta={"kind": section.kind.value, "source": section.source or ""})
 
     # Revision byte patch. Convention: plain digits parse as decimal; anything

@@ -333,7 +333,11 @@ def handle_script(rom: bytearray, section: Section, root: Path) -> WriteRange:
 
 
 # Dispatch table. Kinds without a Phase-2 handler raise via the default.
-HandlerFn = Callable[[bytearray, Section, Path], WriteRange]
+# Handlers may return a single WriteRange for a contiguous write, or a
+# `list[WriteRange]` when a section produces multiple disjoint writes
+# (e.g. the script handler emits pointer-table + per-entry inline +
+# freespace tails). The build driver normalizes both shapes to a list.
+HandlerFn = Callable[[bytearray, Section, Path], "WriteRange | list[WriteRange]"]
 
 def handle_fixed_records(rom: bytearray, section: Section, root: Path) -> WriteRange:
     """Fixed-stride record table. Source = packed binary `file=`. Validates

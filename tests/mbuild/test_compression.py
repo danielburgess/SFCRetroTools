@@ -55,7 +55,7 @@ def test_bin_codec_round_trip(tmp_path, codec):
     )])
     out = tmp_path / "out.sfc"
     build_result = build(build_spec, source_root=tmp_path, out_path=out, original_rom=rom_path)
-    compressed_size = build_result.sections[0].write.length
+    compressed_size = build_result.sections[0].write[0].length
 
     # Now decompress back. Codecs without self-terminating markers need `size`.
     (tmp_path / "src.bin").unlink()

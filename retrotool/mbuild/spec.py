@@ -77,6 +77,13 @@ class Section:
     dedupe: bool = False
     stride: Optional[int] = None            # bytes per record (fixed-records)
     condition: Optional[str] = None         # if="${version}==english"
+    # script-handler extras (LM3 parity)
+    pointer_size: Optional[int] = None      # 2 or 3 — pointer width in table
+    terminator: Optional[int] = None        # entry terminator byte (default 0x00)
+    fallback_table: Optional[PurePosixPath] = None
+    word_wrap: Optional[dict] = None        # {line_width, max_lines, entries}
+    textbuf_limit: Optional[int] = None
+    overflow: Optional[dict] = None         # {strategy, marker, splitter, ...}
     # raw parsed attrs kept for forward-compat / unknown-attr diagnostics
     attrs: dict[str, str] = field(default_factory=dict)
     # front-end provenance (file:line if known)
@@ -106,6 +113,9 @@ class BuildSpec:
     # build-time evaluators (e.g. `if=` conditions) see the same scope as the
     # front-end did.
     vars: dict[str, str] = field(default_factory=dict)
+    # Top-level freespace ranges (PC half-open) shared across handlers that
+    # need overflow allocation. Each pair is [lo, hi).
+    freespace: list[tuple[int, int]] = field(default_factory=list)
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)
