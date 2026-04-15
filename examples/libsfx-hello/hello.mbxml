@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  libsfx-hello — MBXML driving a libSFX build + a patch on top.
+  Scaffold the project first:  retrotool libsfx scaffold ./demo
+  Then:                         retrotool build hello.mbxml -o demo-patched.sfc
+-->
+<build name="demo-patched">
+  <libsfx src="./demo" debug="0"/>
+  <rep file="patch.bin" offset="10"/>
+</build>

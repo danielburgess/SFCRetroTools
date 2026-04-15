@@ -1,9 +1,7 @@
 """SuperFamiconv wrapper — high-level PNG→(tiles, palette, map) conversion.
 
-Resolution order for the binary:
-  1. `retrotool_superfamiconv` package (bundled wheel)
-  2. `superfamiconv` on PATH
-  3. raise SFCNotFoundError
+Binary resolved through `retrotool._toolchain.superfamiconv()` which prefers
+the bundled `retrotool_libsfx` wheel, falls back to `$PATH`.
 
 Usage:
     from retrotool.graphics import png_to_tiles, png_to_palette, png_to_map
@@ -11,36 +9,22 @@ Usage:
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
-
-class SFCNotFoundError(RuntimeError):
-    """Raised when neither bundled nor system SuperFamiconv is available."""
+from retrotool._toolchain import ToolchainError, superfamiconv
 
 
-def _resolve_binary() -> list[str]:
-    try:
-        from retrotool_superfamiconv import binary_path
-        return [str(binary_path())]
-    except ImportError:
-        pass
-    which = shutil.which("superfamiconv")
-    if which:
-        return [which]
-    raise SFCNotFoundError(
-        "SuperFamiconv not found. Install bundled binary: "
-        "`pip install retrotool[graphics]`, or place `superfamiconv` on PATH."
-    )
+# Back-compat alias. New code should import ToolchainError from retrotool.
+SFCNotFoundError = ToolchainError
 
 
 def sfc_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Invoke SuperFamiconv with raw args. Pass-through to subprocess.run."""
     kwargs.setdefault("check", True)
-    return subprocess.run(_resolve_binary() + args, **kwargs)
+    return subprocess.run([str(superfamiconv()), *args], **kwargs)
 
 
 def png_to_tiles(

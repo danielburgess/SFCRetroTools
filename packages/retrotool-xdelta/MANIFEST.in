@@ -1,0 +1,8 @@
+recursive-include vendor *
+global-exclude .git
+global-exclude .github
+global-exclude *.pyc
+global-exclude __pycache__
+include README.md
+include pyproject.toml
+include setup.py

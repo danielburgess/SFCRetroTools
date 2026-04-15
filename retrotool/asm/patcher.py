@@ -35,6 +35,25 @@ def _key(rom: Path, patch: AsarPatch) -> str:
     return sha256_many(parts)
 
 
+def _asar_bundled() -> Optional[str]:
+    """Resolve the bundled `retrotool-asar` binary, if that wheel is installed."""
+    try:
+        from retrotool_asar import asar_binary, ToolNotBundledError
+    except ImportError:
+        return None
+    try:
+        return str(asar_binary())
+    except ToolNotBundledError:
+        return None
+
+
+def _resolve_asar(asar_cmd: str) -> Optional[str]:
+    """Prefer caller-given path, then bundled wheel, then system asar on PATH."""
+    if asar_cmd != "asar":
+        return shutil.which(asar_cmd) or asar_cmd  # explicit override; trust caller
+    return _asar_bundled() or shutil.which("asar")
+
+
 def apply_patch(
     rom: Path,
     patch: AsarPatch,
@@ -42,15 +61,26 @@ def apply_patch(
     cache: Optional[BuildCache] = None,
     asar_cmd: str = "asar",
 ) -> PatchResult:
-    """Apply an Asar patch to `rom` → `out`. Uses BuildCache when provided."""
+    """Apply an Asar patch to `rom` → `out`. Uses BuildCache when provided.
+
+    asar resolution order: explicit `asar_cmd` override (if not the default) →
+    bundled `retrotool-asar` wheel → system `asar` on PATH.
+    """
     key = _key(rom, patch) if cache else None
     if cache and key and cache.has(key):
         entry = cache.get(key)
         out.write_bytes(entry.artifact.read_bytes())
         return PatchResult(ok=True, output_rom=out, cache_hit=True)
 
-    if shutil.which(asar_cmd) is None:
-        return PatchResult(ok=False, output_rom=out, log=f"asar binary not found ({asar_cmd})")
+    binary = _resolve_asar(asar_cmd)
+    if binary is None:
+        return PatchResult(
+            ok=False, output_rom=out,
+            log=(
+                f"asar binary not found — install `retrotool-asar` (bundled) "
+                f"or put `asar` on PATH"
+            ),
+        )
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(rom.read_bytes())
@@ -58,7 +88,7 @@ def apply_patch(
     defines = []
     for k, v in patch.defines.items():
         defines += ["-D", f"{k}={v}"]
-    cmd = [asar_cmd, *defines, str(patch.asm_file), str(out)]
+    cmd = [binary, *defines, str(patch.asm_file), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = (proc.stdout or "") + (proc.stderr or "")
 
