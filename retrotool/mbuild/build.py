@@ -18,7 +18,8 @@ from typing import Callable, Optional
 from retrotool.core.cache import BuildCache, sha256_file, sha256_many
 from retrotool.core.rom import SMC_HEADER_SIZE, _strip_smc_header, detect_header
 from retrotool.mbuild.diff import DiffResult, write_diff
-from retrotool.mbuild.handlers import HandlerError, WriteRange, get_handler
+from retrotool.mbuild.handlers import BuildContext, HandlerError, WriteRange, get_handler
+from retrotool.mbuild.overflow import FreespaceAllocator
 from retrotool.mbuild.interpolate import evaluate_condition
 from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
 
@@ -238,6 +239,11 @@ def build(
         from retrotool.mbuild.prepare import parallel_prepare
         parallel_prepare(spec, files_root, max_workers=parallel)
 
+    ctx = BuildContext(
+        allocator=FreespaceAllocator.from_pairs(list(spec.freespace)) if spec.freespace else None,
+        labels=dict(spec.labels) if hasattr(spec, "labels") and spec.labels else {},
+    )
+
     section_results: list[SectionResult] = []
     skipped: list[Section] = []
     cache_hits = 0
@@ -282,9 +288,13 @@ def build(
             cache_hits += 1
             continue
 
-        raw = handler(rom, section, files_root)
+        raw = handler(rom, section, files_root, ctx)
         writes: list[WriteRange] = [raw] if isinstance(raw, WriteRange) else list(raw)
         section_results.append(SectionResult(section=section, write=writes))
+        # `export-label` registers a global label at the section's first write.
+        export_name = section.attrs.get("export-label")
+        if export_name and writes:
+            ctx.labels[export_name] = writes[0].offset
         if cache and cache_key:
             cache.put(cache_key, _pack_writes(bytes(rom), writes),
                       meta={"kind": section.kind.value, "source": section.source or ""})

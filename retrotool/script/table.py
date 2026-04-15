@@ -10,10 +10,11 @@ class Table:
     """Ported from v0.1 retrotool/script.py. Loads .tbl, encodes/decodes bytes↔text."""
 
     def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False):
-        enc, val_map, char_map, ctrl_lengths, ctrl_prefix, err_count, cnt = self._load_table(table_file)
+        enc, val_map, char_map, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt = self._load_table(table_file)
         self.__val_map = val_map
         self.__chr_map = char_map
         self.__ctrl_lengths = ctrl_lengths
+        self.__ctrl_types = ctrl_types
         self.__ctrl_prefix = ctrl_prefix
         self.__errors = err_count
         self.__parsed_lines = cnt
@@ -42,6 +43,7 @@ class Table:
         val_map: dict[int, str] = {}
         char_map: dict[str, int] = {}
         ctrl_lengths: dict[int, int] = {}
+        ctrl_types: dict[int, str] = {}
         ctrl_prefix: int = 0xFF
         err_count = 0
         cnt = 1
@@ -68,16 +70,31 @@ class Table:
                     # with total byte length N (including the prefix).
                     # Wildcards: @ctrl XX**=N applies to all <prefix> XX yy.
                     if stripped.startswith('@ctrl '):
-                        parts = stripped[6:].split('=')
-                        if len(parts) == 2:
-                            pattern = parts[0].strip()
-                            length = int(parts[1].strip())
+                        # Syntax:  @ctrl XX=N [type=NAME]
+                        # XX may use '**' as a wildcard second nibble.
+                        rest = stripped[6:].strip()
+                        tokens = rest.split()
+                        head = tokens[0] if tokens else ''
+                        if '=' in head:
+                            pattern, length_s = head.split('=', 1)
+                            pattern = pattern.strip()
+                            length = int(length_s.strip())
+                            ctype = None
+                            for extra in tokens[1:]:
+                                if extra.startswith('type='):
+                                    ctype = extra[5:].strip()
                             if '**' in pattern:
                                 prefix = int(pattern.replace('**', ''), 16)
                                 for d in range(0x100):
-                                    ctrl_lengths[prefix * 0x100 + d] = length
+                                    key = prefix * 0x100 + d
+                                    ctrl_lengths[key] = length
+                                    if ctype is not None:
+                                        ctrl_types[key] = ctype
                             else:
-                                ctrl_lengths[int(pattern, 16)] = length
+                                key = int(pattern, 16)
+                                ctrl_lengths[key] = length
+                                if ctype is not None:
+                                    ctrl_types[key] = ctype
                         cnt += 1
                         continue
                     parts = line.split('=')
@@ -103,7 +120,7 @@ class Table:
                     print(f"ERROR: {ex!r}")
                     err_count += 1
                 cnt += 1
-        return enc, val_map, char_map, ctrl_lengths, ctrl_prefix, err_count, cnt
+        return enc, val_map, char_map, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt
 
     @staticmethod
     def _set_maps(in_val, in_ch, val_map, char_map):
@@ -133,6 +150,15 @@ class Table:
     def ctrl_prefix(self) -> int:
         """Control-code prefix byte (default $FF). Set via `@ctrl_prefix XX` directive."""
         return self.__ctrl_prefix
+
+    @property
+    def ctrl_types(self) -> dict[int, str]:
+        """Control-code semantic tags parsed from `@ctrl XX=N type=NAME` lines.
+
+        Keys match `ctrl_lengths` keys. Values are free-form names understood
+        by downstream consumers (e.g. `"redirect"` for FF-redirect opcodes
+        like FFC0/FFF7). Missing entries have no declared type."""
+        return self.__ctrl_types
 
     @property
     def ctrl_lengths(self) -> dict[int, int]:
