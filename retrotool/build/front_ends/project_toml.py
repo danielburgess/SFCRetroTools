@@ -355,6 +355,9 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
     overflow = entry.get("overflow")
     if overflow is not None and not isinstance(overflow, dict):
         raise SchemaError(f"{field_prefix}.overflow must be a table")
+    placement = entry.get("placement")
+    if placement is not None and not isinstance(placement, dict):
+        raise SchemaError(f"{field_prefix}.placement must be a table")
 
     return Section(
         kind=kind,
@@ -377,6 +380,7 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
         word_wrap=word_wrap,
         textbuf_limit=_coerce_int(entry.get("textbuf-limit"), f"{field_prefix}.textbuf-limit"),
         overflow=overflow,
+        placement=placement,
         attrs={k: str(v) for k, v in entry.items()},
         source=f"{source}:sections[{index}]",
         original_kind=None,

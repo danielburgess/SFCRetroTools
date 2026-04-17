@@ -340,33 +340,22 @@ def _ensure_room(rom: bytearray, end: int) -> None:
 
 
 def _script_placement_mode(section: Section, root: Path) -> str:
-    """Decide script placement: `relocate` (ptr-table rewrite + pack) or
-    `overflow` (in-place window patches only, ptr-table untouched).
-
-    Precedence:
-      1. Explicit `section.placement.mode` (`"overflow"` | `"relocate"`).
-      2. Auto-detect: `<<<window[…` present in source file → overflow.
-      3. Default: `relocate`.
+    """Return `section.placement.mode`; required to be `"overflow"` or
+    `"relocate"`. No default: mis-default silently corrupts sibling tables
+    sharing data regions (relocate rewrites ptr-table, overflow does not).
     """
-    if section.placement:
-        m = section.placement.get("mode")
-        if m in ("overflow", "relocate"):
-            return m
-        if m is not None:
-            raise HandlerError(
-                f"{section.source}: placement.mode must be 'overflow' or "
-                f"'relocate', got {m!r}"
-            )
-    if section.files:
-        try:
-            head = _resolve(Path(str(section.files[0])), root).read_text(
-                encoding="utf-8", errors="ignore",
-            )
-        except OSError:
-            return "relocate"
-        if "<<<window" in head:
-            return "overflow"
-    return "relocate"
+    m = (section.placement or {}).get("mode")
+    if m in ("overflow", "relocate"):
+        return m
+    if m is None:
+        raise HandlerError(
+            f"{section.source}: script section requires explicit "
+            f"placement.mode ('overflow' or 'relocate'); no default"
+        )
+    raise HandlerError(
+        f"{section.source}: placement.mode must be 'overflow' or "
+        f"'relocate', got {m!r}"
+    )
 
 
 def handle_script(

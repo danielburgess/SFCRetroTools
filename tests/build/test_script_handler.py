@@ -29,6 +29,7 @@ def test_script_pointer_table_emits_table_and_data(tmp_path):
             pointer_table=0x600,
             pointer_size=2,
             count=2,
+            placement={"mode": "relocate"},
         )],
     )
     result = build(spec, source_root=tmp_path,
@@ -64,6 +65,7 @@ def test_script_global_label_ref_resolves(tmp_path):
             pointer_table=0x600,
             pointer_size=2,
             count=1,
+            placement={"mode": "relocate"},
         )],
     )
     build(spec, source_root=tmp_path,
@@ -92,6 +94,7 @@ def test_script_entry_ref_with_label(tmp_path):
         pointer_table=0x600,
         pointer_size=2,
         count=2,
+        placement={"mode": "relocate"},
     )])
     build(spec, source_root=tmp_path,
           out_path=tmp_path / "out.sfc", original_rom=rom_path)
@@ -135,6 +138,7 @@ def test_script_sentinel_ptr_passthrough(tmp_path):
         pointer_table=0x600,
         pointer_size=2,
         count=3,
+        placement={"mode": "relocate"},
     )])
     build(spec, source_root=tmp_path,
           out_path=tmp_path / "out.sfc", original_rom=rom_path)
@@ -162,6 +166,9 @@ def test_script_from_toml_and_labels(tmp_path):
         [[rom.build.labels]]
         name = "audio"
         at = 0x230000
+
+        [rom.build.section.placement]
+        mode = "relocate"
 
         [[rom.build.sections]]
         kind = "script"

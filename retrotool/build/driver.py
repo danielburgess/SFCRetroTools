@@ -251,6 +251,15 @@ def build(
         labels=dict(spec.labels) if hasattr(spec, "labels") and spec.labels else {},
     )
 
+    # Inherit project-level [rom.build.section.placement] into inline script
+    # sections that didn't declare their own. DataDef-derived sections already
+    # inherit via resolve._section_from_datadef.
+    _default_placement = (spec.section_defaults or {}).get("placement")
+    if _default_placement:
+        for _sec in spec.sections:
+            if _sec.kind is SectionKind.SCRIPT and not _sec.placement:
+                _sec.placement = dict(_default_placement)
+
     section_results: list[SectionResult] = []
     skipped: list[Section] = []
     cache_hits = 0
