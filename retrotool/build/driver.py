@@ -283,13 +283,39 @@ def build(
     skipped: list[Section] = []
     cache_hits = 0
     keep_kind = _section_kinds_filter(only, skip)
-    for section in spec.sections:
+
+    def _section_is_kept(section: Section) -> bool:
         if keep_kind is not None and not keep_kind(section):
-            skipped.append(section)
-            continue
+            return False
         if section.condition is not None and not evaluate_condition(
             section.condition, spec.vars, source=section.source or "",
         ):
+            return False
+        return True
+
+    # Pre-pass: reserve freespace for every cached section we will replay.
+    # Cache stores absolute PCs baked by a prior allocator pass; a fresh
+    # alloc() for a non-cached section processed earlier in iteration order
+    # would otherwise hand out the same bytes. Reserving up-front makes the
+    # fix order-independent.
+    if cache and ctx.allocator is not None:
+        for section in spec.sections:
+            if not _section_is_kept(section):
+                continue
+            cache_key = _section_cache_key(section, files_root)
+            if not cache_key or not cache.has(cache_key):
+                continue
+            try:
+                entry = cache.get(cache_key)
+                blob = entry.artifact.read_bytes()
+                ranges = _unpack_writes(blob)
+            except (OSError, AttributeError, ValueError):
+                continue  # main loop will raise with a clearer error
+            for off, data in ranges:
+                ctx.allocator.reserve(off, len(data))
+
+    for section in spec.sections:
+        if not _section_is_kept(section):
             skipped.append(section)
             continue
         handler = get_handler(section.kind)
