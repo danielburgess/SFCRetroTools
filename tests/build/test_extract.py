@@ -144,6 +144,7 @@ def test_script_pointer_table_round_trip(tmp_path):
         pointer_table=0x600,
         pointer_size=2,
         count=3,
+        placement={"mode": "relocate"},
     )])
     # Extract → writes s.txt.
     extract(spec, source_root=tmp_path, original_rom=rom_path)
@@ -191,6 +192,7 @@ def test_script_pointer_table_ffc0_terminated_no_zero(tmp_path):
         pointer_table=0x600,
         pointer_size=2,
         count=2,
+        placement={"mode": "relocate"},
     )])
     extract(spec, source_root=tmp_path, original_rom=rom_path)
     text = (tmp_path / "s.txt").read_text(encoding="utf-16")
@@ -244,6 +246,7 @@ def test_script_pointer_table_duplicate_src_ptr_dedupe(tmp_path):
         pointer_table=0x600,
         pointer_size=2,
         count=4,
+        placement={"mode": "relocate"},
     )])
     extract(spec, source_root=tmp_path, original_rom=rom_path)
     out = tmp_path / "out.sfc"
@@ -269,6 +272,7 @@ def test_script_round_trip(tmp_path):
             kind=SectionKind.SCRIPT, offset=0x700,
             files=[PurePosixPath("lines.txt")],
             table=PurePosixPath("ascii.tbl"),
+            placement={"mode": "relocate"},
         )],
     )
     out = tmp_path / "out.sfc"

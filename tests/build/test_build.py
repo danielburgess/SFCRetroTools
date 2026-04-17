@@ -205,6 +205,7 @@ def test_script_handler_basic(tmp_path):
             offset=0x700,
             files=[PurePosixPath("lines.txt")],
             table=PurePosixPath("ascii.tbl"),
+            placement={"mode": "relocate"},
         )],
     )
     out = tmp_path / "out.sfc"
