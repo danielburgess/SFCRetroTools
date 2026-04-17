@@ -7,6 +7,7 @@ the build.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -827,15 +828,35 @@ def _handle_script_windowed(
     # freespace. Pointer table stays untouched in both modes.
     from retrotool.script.encode import _read_script_text as _read_text
     file_text = _read_text(script_path)
+    if os.environ.get('RT_DEBUG_AUTO_WIN_ALL'):
+        print(f"[dispatch] {section.source}: windowed={'<<<window' in file_text} path={script_path}")
     if '<<<window' in file_text:
-        return _emit_windowed_marker_writes(
+        # Hybrid: entries without `<<<window>>>` markers take auto-window path
+        # (whole-slot inline/FFC0). Marker entries take per-window FFC0 path.
+        # encode_script_file returns b'\x00' for entries with markers
+        # (line 380-382 of encode.py), so they're naturally skipped by
+        # auto-window when we pass a skip set.
+        from retrotool.script.encode import encode_windowed_script_file as _ewsf
+        _windowed_probe = _ewsf(script_path, table_path, fallback_table=fallback_path)
+        windowed_idx_set = {
+            i for i, w in enumerate(_windowed_probe) if w is not None
+        }
+        writes_a = _emit_auto_window_writes(
+            rom, section, ctx, source_snapshot, orig_pcs, count,
+            script_path, table_path, fallback_path, forward_encoder,
+            skip_indices=windowed_idx_set,
+            ctrl_lengths=ctrl_lengths,
+        )
+        writes_b = _emit_windowed_marker_writes(
             rom, section, ctx, source_snapshot, ctrl_lengths,
             orig_pcs, count, script_path, table_path, fallback_path,
             forward_encoder, return_encoder,
         )
+        return writes_a + writes_b
     return _emit_auto_window_writes(
         rom, section, ctx, source_snapshot, orig_pcs, count,
         script_path, table_path, fallback_path, forward_encoder,
+        ctrl_lengths=ctrl_lengths,
     )
 
 
@@ -850,13 +871,22 @@ def _emit_windowed_marker_writes(
         script_path, table_path, fallback_table=fallback_path,
     )
 
+    _rtd = os.environ.get('RT_DEBUG_AUTO_WIN')
+    _dbg = _rtd and (_rtd == section.source or _rtd in str(section.source))
     writes: list[WriteRange] = []
+    if _dbg:
+        print(f"[windowed] {section.source}: {len(windowed)} entries total")
     for i, entry_windows in enumerate(windowed):
         if entry_windows is None or i >= count:
+            if _dbg and entry_windows is not None:
+                print(f"  [windowed] entry {i}: skipped (i>=count={count})")
             continue
         entry_pc = orig_pcs[i]
+        if _dbg:
+            print(f"  [windowed] entry {i}: slot_pc=0x{entry_pc:06X}, {len(entry_windows)} windows")
         for start, end, encoded_text in entry_windows:
             if not encoded_text:
+                if _dbg: print(f"    win ${start:04X}-${end:04X}: empty encoded_text skip")
                 continue
             window_size = end - start
             absorbed_suffix = b''
@@ -883,7 +913,10 @@ def _emit_windowed_marker_writes(
             # Skip no-op rewrites (encoded identical to source window bytes).
             orig_end = end - len(absorbed_suffix)
             orig_text = bytes(source_snapshot[entry_pc + start + 1:entry_pc + orig_end])
+            if _dbg:
+                print(f"    win ${start:04X}-${end:04X} size={window_size} enc={encoded_text[:16].hex()}({len(encoded_text)}b) orig={orig_text[:16].hex()}({len(orig_text)}b)")
             if encoded_text == orig_text:
+                if _dbg: print(f"      → no-op skip")
                 continue
 
             # Inline FFC0 stub at $start+1 (byte at $start stays in ROM).
@@ -912,6 +945,8 @@ def _emit_windowed_marker_writes(
 def _emit_auto_window_writes(
     rom, section, ctx, source_snapshot, orig_pcs, count,
     script_path, table_path, fallback_path, forward_encoder,
+    skip_indices: Optional[set[int]] = None,
+    ctrl_lengths: Optional[dict[int, int]] = None,
 ) -> list[WriteRange]:
     """Universal in-place + FFC0 overflow for plain `<<$BANK:N>>` files.
 
@@ -940,12 +975,36 @@ def _emit_auto_window_writes(
     # Skip sentinel ptrs (None — decoded outside LoROM mappable area).
     sorted_pcs = sorted({p for p in orig_pcs if p is not None})
 
+    def _measure_source_entry(start_pc: int) -> int:
+        # Ctrl-aware walk: advances past FF <code> runs using ctrl_lengths,
+        # stops at first 0x00 (text terminator) INCLUSIVE. Used as the slot
+        # upper bound for the last entry (no next-ptr distance available).
+        if ctrl_lengths is None:
+            return 0
+        pos = start_pc
+        end_limit = len(source_snapshot)
+        while pos < end_limit:
+            b = source_snapshot[pos]
+            if b == 0x00:
+                return (pos - start_pc) + 1
+            if b == 0xFF and pos + 1 < end_limit:
+                code = source_snapshot[pos + 1]
+                pos += ctrl_lengths.get(code, 2)
+            else:
+                pos += 1
+        return end_limit - start_pc
+
     def _slot_end(slot_pc: int) -> Optional[int]:
         # Binary-style scan; counts are small (≤512) so linear is fine.
         for p in sorted_pcs:
             if p > slot_pc:
                 return p
-        return None
+        # Last entry by PC: no next ptr to bound the slot. Measure the source
+        # text length (ctrl-aware walk to 0x00 terminator) so oversized EN
+        # encodings get FFC0-redirected instead of overwriting post-terminator
+        # data (e.g. a following sub-table sharing the data region).
+        src_len = _measure_source_entry(slot_pc)
+        return slot_pc + src_len if src_len > 0 else None
 
     writes: list[WriteRange] = []
     entry_pc: dict[int, int] = {}        # idx → text-engine entry PC (the slot)
@@ -953,22 +1012,51 @@ def _emit_auto_window_writes(
     entry_labels_pc: dict[int, dict[str, int]] = {}
     pending: list[tuple[int, object]] = []
 
+    _rtd = os.environ.get('RT_DEBUG_AUTO_WIN')
+    _dbg = _rtd and (_rtd == section.source or _rtd in str(section.source))
+    if os.environ.get('RT_DEBUG_AUTO_WIN_ALL'):
+        print(f"[auto_win] section.source={section.source!r}")
     for i, (enc, _orig_addr, ent_fixups, ent_labels) in enumerate(entries):
         slot_pc = orig_pcs[i]
         if slot_pc is None:
-            # Sentinel ptr (decodes outside LoROM) — pass through untouched.
+            if _dbg:
+                print(f"  [auto_win] {section.source} entry {i}: slot_pc=None (sentinel) skip")
+            continue
+        # Empty placeholder (missing/`[end]`-only entry). Writing `\x00` into
+        # the slot would clobber neighboring entries that share the ptr (common
+        # when unused ptrs point into another entry's body). Preserve source.
+        if enc == b'\x00':
+            entry_pc[i] = slot_pc
+            entry_text_pc[i] = slot_pc
+            if _dbg:
+                print(f"  [auto_win] entry {i}: skip (empty placeholder)")
+            continue
+        if skip_indices is not None and i in skip_indices:
+            # Entry has `<<<window>>>` markers — handled by windowed-marker
+            # path. Register slot_pc so fixup resolution can target it.
+            entry_pc[i] = slot_pc
+            entry_text_pc[i] = slot_pc
+            if _dbg:
+                print(f"  [auto_win] entry {i}: skip (marker-windowed)")
             continue
         end = _slot_end(slot_pc)
         slot_size = (end - slot_pc) if end is not None else len(enc)
 
+        if _dbg:
+            src_preview = source_snapshot[slot_pc:slot_pc + min(len(enc), 16)].hex()
+            enc_preview = enc[:16].hex()
+            print(f"  [auto_win] {section.source} entry {i}: slot_pc=0x{slot_pc:06X} slot_size={slot_size} enc_len={len(enc)} src={src_preview} enc={enc_preview}")
+
         # Skip no-op writes when encoded matches the source bytes already.
         if enc == bytes(source_snapshot[slot_pc:slot_pc + len(enc)]):
+            if _dbg: print(f"    → no-op (enc matches source)")
             entry_pc[i] = slot_pc
             entry_text_pc[i] = slot_pc
         elif len(enc) <= slot_size:
             _ensure_room(rom, slot_pc + len(enc))
             rom[slot_pc:slot_pc + len(enc)] = enc
             writes.append(WriteRange(offset=slot_pc, length=len(enc)))
+            if _dbg: print(f"    → inline write {len(enc)}b @ 0x{slot_pc:06X}")
             entry_pc[i] = slot_pc
             entry_text_pc[i] = slot_pc
         else:
@@ -998,6 +1086,7 @@ def _emit_auto_window_writes(
             _ensure_room(rom, slot_pc + 5)
             rom[slot_pc:slot_pc + 5] = stub
             writes.append(WriteRange(offset=slot_pc, length=5))
+            if _dbg: print(f"    → FFC0 stub @ 0x{slot_pc:06X} → tail 0x{tail_pc:06X} ({len(enc)}b)")
             entry_pc[i] = slot_pc
             entry_text_pc[i] = tail_pc
 
