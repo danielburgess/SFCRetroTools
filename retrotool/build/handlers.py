@@ -819,6 +819,33 @@ def _handle_script_windowed(
         if ret_name:
             return_encoder = get_pointer_encoder(str(ret_name))
 
+    # Dispatch by file format. Files with explicit `<<<window[N]:$S-$E>>>`
+    # blocks use the per-window FFC0 patcher (mid-entry text inside bytecode
+    # streams). Plain `<<$BANK:N [$ADDR]>>` files use auto-window mode: each
+    # entry is treated as a whole-entry window — write inline if it fits the
+    # source slot (next entry's PC), else FFC0-redirect the entire entry to
+    # freespace. Pointer table stays untouched in both modes.
+    from retrotool.script.encode import _read_script_text as _read_text
+    file_text = _read_text(script_path)
+    if '<<<window' in file_text:
+        return _emit_windowed_marker_writes(
+            rom, section, ctx, source_snapshot, ctrl_lengths,
+            orig_pcs, count, script_path, table_path, fallback_path,
+            forward_encoder, return_encoder,
+        )
+    return _emit_auto_window_writes(
+        rom, section, ctx, source_snapshot, orig_pcs, count,
+        script_path, table_path, fallback_path, forward_encoder,
+    )
+
+
+def _emit_windowed_marker_writes(
+    rom, section, ctx, source_snapshot, ctrl_lengths,
+    orig_pcs, count, script_path, table_path, fallback_path,
+    forward_encoder, return_encoder,
+) -> list[WriteRange]:
+    """Per-window FFC0 patches for files with explicit `<<<window>>>` blocks."""
+    from retrotool.script.encode import encode_windowed_script_file
     windowed = encode_windowed_script_file(
         script_path, table_path, fallback_table=fallback_path,
     )
@@ -878,6 +905,134 @@ def _handle_script_windowed(
 
             # Patch the 3-byte placeholder at ffc0_pc+2 with the tail PC.
             rom[ffc0_pc + 2:ffc0_pc + 5] = forward_encoder(tail_pc)
+
+    return writes
+
+
+def _emit_auto_window_writes(
+    rom, section, ctx, source_snapshot, orig_pcs, count,
+    script_path, table_path, fallback_path, forward_encoder,
+) -> list[WriteRange]:
+    """Universal in-place + FFC0 overflow for plain `<<$BANK:N>>` files.
+
+    For each entry: write encoded EN bytes at the original ptr's PC if they
+    fit within the source slot (distance to the next entry's PC). Oversize
+    entries get a 5-byte `FF C0 <3-byte ptr>` stub at the slot, with the
+    full encoded text written to `ctx.allocator` freespace. The pointer
+    table is never rewritten — sibling tables sharing the data region
+    (e.g. dialog-1..5) keep their references valid.
+    """
+    from retrotool.script.encode import encode_script_file
+
+    entries = encode_script_file(
+        script_path, table_path,
+        fallback_table=fallback_path,
+        word_wrap=section.word_wrap,
+        textbuf_limit=section.textbuf_limit,
+        sub_table_filter=section.pointer_table,
+    )
+    while len(entries) < count:
+        entries.append((b"\x00", None, [], {}))
+    entries = entries[:count]
+
+    # Per-entry slot end = nearest strictly-greater original PC across all
+    # entries. Handles non-monotonic / duplicate ptrs that share bodies.
+    # Skip sentinel ptrs (None — decoded outside LoROM mappable area).
+    sorted_pcs = sorted({p for p in orig_pcs if p is not None})
+
+    def _slot_end(slot_pc: int) -> Optional[int]:
+        # Binary-style scan; counts are small (≤512) so linear is fine.
+        for p in sorted_pcs:
+            if p > slot_pc:
+                return p
+        return None
+
+    writes: list[WriteRange] = []
+    entry_pc: dict[int, int] = {}        # idx → text-engine entry PC (the slot)
+    entry_text_pc: dict[int, int] = {}   # idx → PC where encoded bytes start
+    entry_labels_pc: dict[int, dict[str, int]] = {}
+    pending: list[tuple[int, object]] = []
+
+    for i, (enc, _orig_addr, ent_fixups, ent_labels) in enumerate(entries):
+        slot_pc = orig_pcs[i]
+        if slot_pc is None:
+            # Sentinel ptr (decodes outside LoROM) — pass through untouched.
+            continue
+        end = _slot_end(slot_pc)
+        slot_size = (end - slot_pc) if end is not None else len(enc)
+
+        # Skip no-op writes when encoded matches the source bytes already.
+        if enc == bytes(source_snapshot[slot_pc:slot_pc + len(enc)]):
+            entry_pc[i] = slot_pc
+            entry_text_pc[i] = slot_pc
+        elif len(enc) <= slot_size:
+            _ensure_room(rom, slot_pc + len(enc))
+            rom[slot_pc:slot_pc + len(enc)] = enc
+            writes.append(WriteRange(offset=slot_pc, length=len(enc)))
+            entry_pc[i] = slot_pc
+            entry_text_pc[i] = slot_pc
+        else:
+            # Oversize → FFC0 redirect. Slot must hold the 5-byte stub.
+            # When slot < 5, absorption isn't safe in auto-window mode: every
+            # byte past slot_pc is owned by an adjacent entry's pointer, and
+            # absorbing would clobber its data. Warn loudly and skip — leaves
+            # source bytes intact so adjacent ptrs stay valid; the EN content
+            # is dropped for this entry (user must review).
+            if slot_size < 5:
+                print(
+                    f"  WARNING: {section.source} entry {i:4d} slot too small "
+                    f"({slot_size}b) for FFC0 stub (5b); encoded EN is "
+                    f"{len(enc)}b — SKIPPING write, source bytes preserved. "
+                    f"Likely an empty JP entry that gained EN content; "
+                    f"verify the translation belongs here."
+                )
+                entry_pc[i] = slot_pc
+                entry_text_pc[i] = slot_pc
+                continue
+            tail_pc = ctx.allocator.alloc(len(enc))
+            _ensure_room(rom, tail_pc + len(enc))
+            rom[tail_pc:tail_pc + len(enc)] = enc
+            writes.append(WriteRange(offset=tail_pc, length=len(enc)))
+
+            stub = b'\xFF\xC0' + forward_encoder(tail_pc)
+            _ensure_room(rom, slot_pc + 5)
+            rom[slot_pc:slot_pc + 5] = stub
+            writes.append(WriteRange(offset=slot_pc, length=5))
+            entry_pc[i] = slot_pc
+            entry_text_pc[i] = tail_pc
+
+        text_pc = entry_text_pc[i]
+        if ent_labels:
+            entry_labels_pc[i] = {n: text_pc + off for n, off in ent_labels.items()}
+        for fx in ent_fixups:
+            pending.append((text_pc + fx.offset, fx))
+
+    # Resolve [FFC0@N] / [FFC0@N:label] / [HHHH@@global] now that all entries
+    # are placed. Targets always point at the entry's slot PC (the text
+    # engine reads from there — FFC0-redirected entries forward transparently).
+    for rom_pc, fx in pending:
+        if fx.global_label is not None:
+            if ctx is None or fx.global_label not in ctx.labels:
+                raise HandlerError(
+                    f"{section.source}: [HHHH@@{fx.global_label}] — unknown global label"
+                )
+            target_pc = ctx.labels[fx.global_label]
+        else:
+            if fx.entry_idx not in entry_pc:
+                raise HandlerError(
+                    f"{section.source}: [HHHH@{fx.entry_idx}] → missing entry"
+                )
+            target_pc = entry_pc[fx.entry_idx]
+            if fx.label is not None:
+                target_labels = entry_labels_pc.get(fx.entry_idx, {})
+                if fx.label not in target_labels:
+                    raise HandlerError(
+                        f"{section.source}: [HHHH@{fx.entry_idx}:{fx.label}] — "
+                        f"label not defined in target entry"
+                    )
+                target_pc = target_labels[fx.label]
+        addr = forward_encoder(target_pc)
+        rom[rom_pc:rom_pc + len(addr)] = addr
 
     return writes
 
