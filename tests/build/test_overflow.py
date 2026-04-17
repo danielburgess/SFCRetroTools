@@ -38,6 +38,33 @@ def test_freespace_exhausted():
         a.alloc(1)
 
 
+def test_freespace_reserve_advances_cursor_to_write_end():
+    a = FreespaceAllocator.from_pairs([(0x100, 0x200)])
+    # Cached write lands mid-range; subsequent alloc must start past it.
+    assert a.reserve(0x100, 0x40) is True
+    assert a.alloc(0x10) == 0x140
+
+
+def test_freespace_reserve_does_not_reclaim_gap_below_cursor():
+    a = FreespaceAllocator.from_pairs([(0x100, 0x200)])
+    # Simulate a cached write that was allocated mid-range previously — we
+    # cannot reclaim the 0x100-0x180 gap (cursor is monotonic by design).
+    assert a.reserve(0x180, 0x40) is True
+    assert a.alloc(0x10) == 0x1C0
+
+
+def test_freespace_reserve_outside_range_is_noop():
+    a = FreespaceAllocator.from_pairs([(0x100, 0x200)])
+    assert a.reserve(0x500, 0x10) is False
+    assert a.alloc(0x10) == 0x100
+
+
+def test_freespace_reserve_exhausts_range_and_rolls_over():
+    a = FreespaceAllocator.from_pairs([(0x100, 0x110), (0x200, 0x300)])
+    assert a.reserve(0x100, 0x10) is True  # fully consumes first range
+    assert a.alloc(8) == 0x200
+
+
 def test_fail_strategy_passes_short_entry():
     s = FailStrategy()
     p = s.pack(Entry("e", b"abc", max_inline=8), allocator=None)

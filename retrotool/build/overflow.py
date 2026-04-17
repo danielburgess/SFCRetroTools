@@ -74,6 +74,28 @@ class FreespaceAllocator:
             self._cursor += 1
         raise FreespaceExhausted(f"no freespace range fits {n} bytes")
 
+    def reserve(self, off: int, n: int) -> bool:
+        """Mark `[off, off+n)` as consumed if it lies inside a freespace range.
+
+        Used when replaying cached writes: the cache already holds an absolute
+        PC that was allocated in a prior build, so the cursor must be advanced
+        past it or a later `alloc()` will hand out the same bytes. Only
+        advances monotonically (never reclaims gaps below the cursor).
+
+        Returns True if the write intersected a freespace range, else False.
+        """
+        if n <= 0:
+            return False
+        end = off + n
+        for idx, r in enumerate(self._ranges):
+            if off < r.hi and end > r.lo:
+                if end > r.lo:
+                    r.lo = min(r.hi, max(r.lo, end))
+                if r.lo >= r.hi and idx >= self._cursor:
+                    self._cursor = max(self._cursor, idx + 1)
+                return True
+        return False
+
     def remaining(self) -> int:
         return sum(r.remaining for r in self._ranges[self._cursor:])
 
