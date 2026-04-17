@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from retrotool.mbuild.overflow import (
+from retrotool.build.overflow import (
     Entry,
     FailStrategy,
     FreespaceAllocator,
@@ -123,7 +123,7 @@ def test_inline_redirect_rejects_too_small_budget():
 
 
 def test_inline_redirect_defer_pointer_emits_fixup():
-    from retrotool.mbuild.overflow import PackFixup
+    from retrotool.build.overflow import PackFixup
     alloc = FreespaceAllocator.from_pairs([(0x30000, 0x40000)])
     s = InlineRedirectStrategy(defer_pointer=True)
     encoded = b"\x10ABCDEFGHIJ"  # 11 bytes

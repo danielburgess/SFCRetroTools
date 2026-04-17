@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from retrotool.mbuild.handlers import HandlerError, handle_project
-from retrotool.mbuild.spec import Section, SectionKind
+from retrotool.build.handlers import HandlerError, handle_project
+from retrotool.build.spec import Section, SectionKind
 
 
 def _section(src: str):

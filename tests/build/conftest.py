@@ -2,7 +2,7 @@
 
 Prior iterations had `_make_lorom` duplicated (with minor divergences) across
 every test module, plus cross-test imports like
-`from tests.mbuild.test_build import _make_lorom`. Factor the builder here
+`from tests.build.test_build import _make_lorom`. Factor the builder here
 and expose it as a fixture so tests stay independent of each other's layout.
 """
 from __future__ import annotations

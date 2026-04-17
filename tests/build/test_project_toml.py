@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec,
     Section,
     SectionKind,
@@ -18,7 +18,7 @@ from retrotool.mbuild import (
     parse_project_toml,
     parse_project_toml_dict,
 )
-from retrotool.mbuild.front_ends.schema import SchemaError
+from retrotool.build.front_ends.schema import SchemaError
 
 
 _ROM_SIZE = 0x80_000
@@ -43,9 +43,11 @@ def _make_lorom(tmp_path: Path) -> Path:
 
 def test_parse_scalar_build_fields(tmp_path):
     toml_text = textwrap.dedent("""
-        [mbuild]
-        original = "base.sfc"
+        [rom]
         name = "Demo"
+        file = "base.sfc"
+
+        [rom.build]
         version = "v1"
         revision = "01"
         revbyteloc = 0x7FDB
@@ -66,12 +68,12 @@ def test_parse_scalar_build_fields(tmp_path):
 
 def test_section_file_as_string_or_list():
     data = {
-        "mbuild": {
+        "rom": {"file": "base.sfc", "build": {
             "sections": [
                 {"kind": "rep", "offset": 0x100, "file": "single.bin"},
                 {"kind": "ins", "offset": 0x200, "file": ["a.bin", "b.bin"]},
             ]
-        }
+        }}
     }
     spec = parse_project_toml_dict(data)
     assert spec.sections[0].files == [PurePosixPath("single.bin")]
@@ -79,43 +81,58 @@ def test_section_file_as_string_or_list():
 
 
 def test_offset_hex_string_accepted():
-    data = {"mbuild": {"sections": [
+    data = {"rom": {"file": "base.sfc", "build": {"sections": [
         {"kind": "rep", "offset": "0x11E3", "file": "a.bin"},
         {"kind": "rep", "offset": "11E3", "file": "b.bin"},  # MBuild raw-hex
-    ]}}
+    ]}}}
     spec = parse_project_toml_dict(data)
     assert spec.sections[0].offset == 0x11E3
     assert spec.sections[1].offset == 0x11E3
 
 
-def test_missing_mbuild_table_raises(tmp_path):
+def test_missing_build_table_raises(tmp_path):
     p = tmp_path / "project.toml"
     p.write_text("[other]\nfoo = 1\n")
-    with pytest.raises(SchemaError, match="no \\[mbuild\\] table"):
+    with pytest.raises(SchemaError, match="no \\[rom\\.build\\] table"):
         parse_project_toml(p)
 
 
+def test_original_in_rom_build_rejected():
+    data = {"rom": {"file": "base.sfc", "build": {"original": "other.sfc"}}}
+    with pytest.raises(SchemaError, match=r"\[rom\.build\]\.original"):
+        parse_project_toml_dict(data)
+
+
+def test_name_in_rom_build_rejected():
+    data = {"rom": {"name": "Demo", "file": "base.sfc",
+                    "build": {"name": "Other"}}}
+    with pytest.raises(SchemaError, match=r"\[rom\.build\]\.name"):
+        parse_project_toml_dict(data)
+
+
 def test_unknown_kind_raises():
-    data = {"mbuild": {"sections": [{"kind": "frobnicate", "offset": 0}]}}
+    data = {"rom": {"file": "base.sfc", "build": {
+        "sections": [{"kind": "frobnicate", "offset": 0}]}}}
     with pytest.raises(SchemaError, match="unknown kind"):
         parse_project_toml_dict(data)
 
 
 def test_missing_kind_raises():
-    data = {"mbuild": {"sections": [{"offset": 0}]}}
+    data = {"rom": {"file": "base.sfc", "build": {
+        "sections": [{"offset": 0}]}}}
     with pytest.raises(SchemaError, match="missing kind"):
         parse_project_toml_dict(data)
 
 
 def test_unified_bin_section_roundtrip():
     data = {
-        "mbuild": {
+        "rom": {"file": "base.sfc", "build": {
             "sections": [{
                 "kind": "bin", "offset": "0x200000",
                 "file": "chunk.bin", "codec": "lzss-zamn",
                 "grow": "replace", "size": 256,
             }]
-        }
+        }}
     }
     spec = parse_project_toml_dict(data)
     sec = spec.sections[0]
@@ -133,12 +150,14 @@ def test_smoke_build_from_project_toml(tmp_path):
     (tmp_path / "patch.bin").write_bytes(b"\xCA\xFE\xBA\xBE")
     p = tmp_path / "project.toml"
     p.write_text(textwrap.dedent(f"""
-        [mbuild]
-        original = "{rom_path.name}"
+        [rom]
         name = "Demo"
+        file = "{rom_path.name}"
+
+        [rom.build]
         pad = true
 
-        [[mbuild.sections]]
+        [[rom.build.sections]]
         kind = "rep"
         offset = 0x600
         file = "patch.bin"
@@ -151,7 +170,7 @@ def test_smoke_build_from_project_toml(tmp_path):
 
 def test_toml_and_mbxml_produce_equivalent_spec(tmp_path):
     """Equivalent inputs → byte-identical output ROMs."""
-    from retrotool.mbuild import parse_mbxml
+    from retrotool.build import parse_mbxml
     rom_path = _make_lorom(tmp_path)
     (tmp_path / "patch.bin").write_bytes(b"\x12\x34\x56\x78")
 
@@ -163,11 +182,13 @@ def test_toml_and_mbxml_produce_equivalent_spec(tmp_path):
     )
     toml_path = tmp_path / "project.toml"
     toml_path.write_text(textwrap.dedent(f"""
-        [mbuild]
-        original = "{rom_path.name}"
+        [rom]
+        file = "{rom_path.name}"
+
+        [rom.build]
         pad = true
 
-        [[mbuild.sections]]
+        [[rom.build.sections]]
         kind = "rep"
         offset = 0x500
         file = "patch.bin"
@@ -186,13 +207,12 @@ def test_toml_and_mbxml_produce_equivalent_spec(tmp_path):
 def test_extract_via_toml_frontend(tmp_path):
     rom_path = _make_lorom(tmp_path)
     data = {
-        "mbuild": {
-            "original": rom_path.name,
+        "rom": {"file": rom_path.name, "build": {
             "sections": [{
                 "kind": "rep", "offset": "0x100", "size": 8,
                 "file": "dump.bin",
             }],
-        }
+        }}
     }
     spec = parse_project_toml_dict(data)
     extract(spec, source_root=tmp_path, original_rom=rom_path)
@@ -203,18 +223,19 @@ def test_extract_via_toml_frontend(tmp_path):
 
 
 def test_include_splices_sections(tmp_path):
-    from retrotool.mbuild import parse_project_toml
+    from retrotool.build import parse_project_toml
     (tmp_path / "tables").mkdir()
     (tmp_path / "tables" / "extra.toml").write_text(
-        '[mbuild]\n'
-        '[[mbuild.sections]]\nkind="rep"\noffset=0x200\nfile="b.bin"\n',
+        '[rom.build]\n'
+        '[[rom.build.sections]]\nkind="rep"\noffset=0x200\nfile="b.bin"\n',
         encoding="utf-8",
     )
     (tmp_path / "project.toml").write_text(
-        '[mbuild]\n'
-        'original="base.sfc"\n'
+        '[rom]\n'
+        'file="base.sfc"\n'
+        '[rom.build]\n'
         'include = ["tables/extra.toml"]\n'
-        '[[mbuild.sections]]\nkind="rep"\noffset=0x100\nfile="a.bin"\n',
+        '[[rom.build.sections]]\nkind="rep"\noffset=0x100\nfile="a.bin"\n',
         encoding="utf-8",
     )
     spec = parse_project_toml(tmp_path / "project.toml")
@@ -222,13 +243,13 @@ def test_include_splices_sections(tmp_path):
 
 
 def test_include_cycle_detected(tmp_path):
-    from retrotool.mbuild import parse_project_toml
-    from retrotool.mbuild.front_ends.schema import SchemaError
+    from retrotool.build import parse_project_toml
+    from retrotool.build.front_ends.schema import SchemaError
     (tmp_path / "a.toml").write_text(
-        '[mbuild]\ninclude = ["b.toml"]\n', encoding="utf-8"
+        '[rom.build]\ninclude = ["b.toml"]\n', encoding="utf-8"
     )
     (tmp_path / "b.toml").write_text(
-        '[mbuild]\ninclude = ["a.toml"]\n', encoding="utf-8"
+        '[rom.build]\ninclude = ["a.toml"]\n', encoding="utf-8"
     )
     with pytest.raises(SchemaError, match="cycle"):
         parse_project_toml(tmp_path / "a.toml")
@@ -236,11 +257,13 @@ def test_include_cycle_detected(tmp_path):
 
 def test_parse_script_section_extras(tmp_path):
     toml_text = textwrap.dedent("""
-        [mbuild]
-        original = "base.sfc"
+        [rom]
+        file = "base.sfc"
+
+        [rom.build]
         freespace = [[0x230000, 0x234000], [0x234000, 0x238000]]
 
-        [[mbuild.sections]]
+        [[rom.build.sections]]
         kind = "script"
         file = "scene-desc-name.txt"
         table = "eng.tbl"
@@ -252,7 +275,7 @@ def test_parse_script_section_extras(tmp_path):
         textbuf-limit = 0x1F0
         word-wrap = { line-width = 26, max-lines = 6, entries = "0-56" }
 
-        [mbuild.sections.overflow]
+        [rom.build.sections.overflow]
         strategy = "inline-redirect"
         marker = [0xFF, 0xC0]
         splitter = "split-at-last-marker-byte"
@@ -274,9 +297,38 @@ def test_parse_script_section_extras(tmp_path):
     assert s.overflow["splitter"] == "split-at-last-marker-byte"
 
 
+def test_section_datadef_keyword_rejected():
+    """`datadef=` on an inline section is no longer accepted — DataDefs
+    auto-include via their own `[section]` sub-table now."""
+    data = {"rom": {"file": "base.sfc", "build": {
+        "sections": [{"kind": "script", "datadef": "x", "file": "s.txt"}]
+    }}}
+    with pytest.raises(SchemaError, match="no longer accepted"):
+        parse_project_toml_dict(data)
+
+
+def test_order_parsed(tmp_path):
+    (tmp_path / "project.toml").write_text(textwrap.dedent("""
+        [rom]
+        file = "base.sfc"
+
+        [rom.build]
+        order = ["alpha", "beta"]
+    """), encoding="utf-8")
+    spec = parse_project_toml(tmp_path / "project.toml")
+    assert spec.order == ["alpha", "beta"]
+
+
+def test_order_type_validated():
+    data = {"rom": {"file": "base.sfc", "build": {"order": "alpha"}}}
+    with pytest.raises(SchemaError, match="order must be a list"):
+        parse_project_toml_dict(data)
+
+
 def test_freespace_invalid_pair(tmp_path):
     (tmp_path / "project.toml").write_text(
-        '[mbuild]\noriginal="base.sfc"\nfreespace=[[0x100, 0x100]]\n', encoding="utf-8"
+        '[rom]\nfile="base.sfc"\n[rom.build]\nfreespace=[[0x100, 0x100]]\n',
+        encoding="utf-8"
     )
     with pytest.raises(SchemaError, match="invalid range"):
         parse_project_toml(tmp_path / "project.toml")

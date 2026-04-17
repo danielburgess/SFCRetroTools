@@ -38,12 +38,14 @@ class SectionKind(str, Enum):
     ASARDEF = "asardef"
     LIBSFX = "libsfx"
     FIXED_RECORDS = "fixed-records"
+    WINDOWED_SCRIPT = "windowed-script"
 
     @property
     def operation(self) -> str:
         last = self.value[-1]
         if self.value in ("bin", "asar", "graphics", "script", "project",
-                          "asardef", "libsfx", "fixed-records"):
+                          "asardef", "libsfx", "fixed-records",
+                          "windowed-script"):
             return OP_REPLACE  # default; actual behavior handler-specific
         return OP_INSERT if last == "i" else OP_REPLACE
 
@@ -84,6 +86,15 @@ class Section:
     word_wrap: Optional[dict] = None        # {line_width, max_lines, entries}
     textbuf_limit: Optional[int] = None
     overflow: Optional[dict] = None         # {strategy, marker, splitter, ...}
+    # Placement mode: "overflow" = in-place patch + window redirects (ptr
+    # table untouched); "relocate" = rewrite ptr table into new data region.
+    # When None, handler auto-detects (windowed syntax in source file →
+    # overflow, otherwise → relocate).
+    placement: Optional[dict] = None
+    # When a Section was synthesized from a DataDef's `[section]` sub-table,
+    # the DataDef name is recorded here. Populated by `sections_from_datadefs`;
+    # never set by TOML/MBXML parsers directly. Informational only.
+    from_datadef: Optional[str] = None
     # raw parsed attrs kept for forward-compat / unknown-attr diagnostics
     attrs: dict[str, str] = field(default_factory=dict)
     # front-end provenance (file:line if known)
@@ -106,6 +117,7 @@ class BuildSpec:
     revbyteloc: Optional[int] = None        # ROM offset where revision byte lives
     path: Optional[PurePosixPath] = None    # build-files root (relative to mbxml file)
     pad: bool = False
+    pad_byte: int = 0x00                    # Byte value used for ROM expansion + tail pad.
     diff: Optional[str] = None              # "xdelta" | "ips" | None
     sections: list[Section] = field(default_factory=list)
     source_path: Optional[PurePosixPath] = None  # where this spec was parsed from
@@ -116,9 +128,24 @@ class BuildSpec:
     # Top-level freespace ranges (PC half-open) shared across handlers that
     # need overflow allocation. Each pair is [lo, hi).
     freespace: list[tuple[int, int]] = field(default_factory=list)
-    # Global label registry populated from `[[mbuild.labels]]`. Sections may
+    # Global label registry populated from `[[build.labels]]`. Sections may
     # also register labels dynamically via `export-label=`.
     labels: dict[str, int] = field(default_factory=dict)
+    # Explicit pipeline order (by section key — DataDef name or inline name=).
+    # When set, listed names come first in the given order; remaining sections
+    # follow, sorted by offset. `None` means auto-sort-by-offset.
+    order: Optional[list[str]] = None
+    # Project-level defaults for DataDef-derived sections. Parsed from
+    # `[rom.build.section.overflow]` / `[rom.build.section.placement]` in
+    # project.toml. Each datadef inherits these unless its own `[section]`
+    # sub-table redeclares the same top-level key (full-key override, no
+    # deep merge). Inline `[[rom.build.sections]]` are NOT affected.
+    section_defaults: dict = field(default_factory=dict)
+    # Project-level default source-data directory for script files. Parsed
+    # from the top-level `en_data_dir=` scalar in project.toml. Resolver
+    # uses this to synthesize `{en_data_dir}/{datadef.name}.txt` when a
+    # DataDef's `[section]` omits both `en_file=` and `file=`.
+    en_data_dir: Optional[str] = None
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)

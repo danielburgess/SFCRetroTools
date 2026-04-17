@@ -20,7 +20,7 @@ class EncodingSection:
 
 @dataclass
 class PointersSection:
-    address: int
+    offset: int                       # where the pointer table begins (PC/SNES)
     count: int
     size: int = 2                     # 2 or 3
     bank_override: Optional[int] = None
@@ -28,10 +28,32 @@ class PointersSection:
 
 @dataclass
 class DataSection:
-    start: int
+    offset: int                       # where the data block begins (PC/SNES)
     end: Optional[int] = None
     compression: str = "none"
     compression_params: dict = field(default_factory=dict)
+
+
+@dataclass
+class BuildStep:
+    """`[section]` sub-table in a DataDef. Declares the build-pipeline step
+    for this table: what kind of section, which source file to patch with,
+    and any build-only strategy (overflow, grow, codec).
+
+    The ROM-structure facts (offset, count, pointer size, encoding table)
+    come from the DataDef's other sub-tables — never redeclared here.
+    """
+    kind: str                         # SectionKind value (e.g. "script", "fixed-records")
+    file: Optional[str] = None        # source input file (text / bin). Usually omitted —
+                                      # resolver defaults to {project.en_data_dir}/{name}.txt.
+                                      # Legacy alias for `en_file`.
+    grow: Optional[str] = None        # "insert" | "replace" | "fail"
+    codec: Optional[str] = None
+    condition: Optional[str] = None   # `if=` expression
+    offset: Optional[int] = None      # explicit anchor when DataDef has no pointers/data section
+    overflow: dict = field(default_factory=dict)  # strategy/marker/splitter/...
+    placement: dict = field(default_factory=dict) # {mode: "overflow"|"relocate"}
+    extras: dict = field(default_factory=dict)    # forward-compat raw attrs
 
 
 @dataclass
@@ -58,7 +80,23 @@ class DataDef:
     data: Optional[DataSection] = None
     relocation: Optional[RelocationSection] = None
     display: Optional[DisplaySection] = None
+    section: Optional[BuildStep] = None   # `[section]` sub-table (opt-in build)
     extras: dict = field(default_factory=dict)
+
+    @property
+    def anchor_offset(self) -> Optional[int]:
+        """Canonical offset for ordering pipeline sections.
+
+        Falls back through pointers → data → [section] so a DataDef with any
+        shape has a single answer. Returns None only if none of them set one.
+        """
+        if self.pointers is not None:
+            return self.pointers.offset
+        if self.data is not None:
+            return self.data.offset
+        if self.section is not None and self.section.offset is not None:
+            return self.section.offset
+        return None
 
 
 def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
@@ -80,8 +118,13 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
 
     pointers = None
     if ptr := doc.get("pointers"):
+        if "offset" not in ptr:
+            raise ValueError(
+                f"datadef {name}: [pointers] missing 'offset' "
+                f"(was 'address' in legacy schema — rename it)"
+            )
         pointers = PointersSection(
-            address=parse_snes_addr(ptr["address"]),
+            offset=parse_snes_addr(ptr["offset"]),
             count=int(ptr["count"]),
             size=int(ptr.get("size", 2)),
             bank_override=parse_snes_addr(ptr["bank_override"]) if ptr.get("bank_override") else None,
@@ -94,8 +137,13 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
         comp = d.get("compression", "none")
         if comp not in COMPRESSION_TYPES:
             raise ValueError(f"datadef {name}: unknown compression {comp!r}")
+        if "offset" not in d:
+            raise ValueError(
+                f"datadef {name}: [data] missing 'offset' "
+                f"(was 'start' in legacy schema — rename it)"
+            )
         data = DataSection(
-            start=parse_snes_addr(d["start"]),
+            offset=parse_snes_addr(d["offset"]),
             end=parse_snes_addr(d["end"]) if d.get("end") else None,
             compression=comp,
             compression_params=dict(d.get("compression_params") or {}),
@@ -117,8 +165,60 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
             windowed=bool(disp.get("windowed", False)),
         )
 
+    section = None
+    sec_doc = doc.get("section")
+    # Presence (even empty) signals "include in build pipeline". Empty is
+    # valid — all defaults (kind="script", file=en_data_dir/name.txt, etc.)
+    # come from project-level config.
+    if sec_doc is not None:
+        if not isinstance(sec_doc, dict):
+            raise ValueError(f"datadef {name}: [section] must be a table")
+        # `kind` defaults to "script" — the overwhelmingly common case.
+        # Fixed-width tables (unit-names etc) must declare kind="fixed-records"
+        # explicitly; other kinds (font, asar, ...) similarly.
+        kind = sec_doc.get("kind", "script")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError(f"datadef {name}: [section].kind must be a string")
+        # [section] must not redeclare ROM-structure facts owned by pointers/
+        # data/encoding/word_wrap/etc — single source of truth.
+        forbidden = {"pointer-table", "pointer-size", "count", "table",
+                     "fallback-table", "terminator", "word-wrap",
+                     "textbuf-limit", "stride"}
+        clashes = [k for k in forbidden if k in sec_doc]
+        if clashes:
+            raise ValueError(
+                f"datadef {name}: [section] cannot redeclare {clashes!r} — "
+                f"those live in [pointers]/[data]/[encoding]/[word_wrap]/extras"
+            )
+        known = {"kind", "file", "en_file", "grow", "codec", "if", "offset",
+                 "overflow", "placement"}
+        # `en_file` is the preferred key; `file` is kept as a legacy alias.
+        # Resolver auto-defaults when both are absent (→ {en_data_dir}/{name}.txt).
+        en_file = sec_doc.get("en_file")
+        file_alias = sec_doc.get("file")
+        if en_file and file_alias:
+            raise ValueError(
+                f"datadef {name}: [section] has both en_file= and file= — "
+                f"pick one (en_file is preferred)"
+            )
+        placement = sec_doc.get("placement")
+        if placement is not None and not isinstance(placement, dict):
+            raise ValueError(f"datadef {name}: [section.placement] must be a table")
+        section = BuildStep(
+            kind=kind,
+            file=en_file or file_alias,
+            grow=sec_doc.get("grow"),
+            codec=sec_doc.get("codec"),
+            condition=sec_doc.get("if"),
+            offset=parse_snes_addr(sec_doc["offset"]) if sec_doc.get("offset") is not None else None,
+            overflow=dict(sec_doc.get("overflow") or {}),
+            placement=dict(placement or {}),
+            extras={k: v for k, v in sec_doc.items() if k not in known},
+        )
+
     extras = {k: v for k, v in doc.items() if k not in
-              {"table", "encoding", "pointers", "data", "relocation", "display"}}
+              {"table", "encoding", "pointers", "data", "relocation",
+               "display", "section"}}
 
     return DataDef(
         name=name,
@@ -129,5 +229,6 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
         data=data,
         relocation=relocation,
         display=display,
+        section=section,
         extras=extras,
     )

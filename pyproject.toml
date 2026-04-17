@@ -47,6 +47,12 @@ build-backend = "setuptools.build_meta"
 include = ["retrotool*"]
 exclude = ["tests*", "examples*"]
 
+# Pytest's default `norecursedirs` includes "build" (standard Python build
+# output dir). We have a real test subpackage at tests/build/ that collides
+# with that default — override to the stock list minus "build".
+[tool.pytest.ini_options]
+norecursedirs = ["*.egg", ".*", "_darcs", "CVS", "dist", "node_modules", "venv", "{arch}", "vendor", "packages"]
+
 [project.scripts]
 retrotool = "retrotool.cli:main"
 

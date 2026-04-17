@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec,
     HandlerError,
     Section,
@@ -153,7 +153,7 @@ def test_mbxml_lzr_auto_migrate_builds(tmp_path):
     """A legacy <lzr> element should parse, warn, and build via the codec
     registry — all in one go."""
     import warnings
-    from retrotool.mbuild import parse_mbxml_string, MBXMLDeprecationWarning
+    from retrotool.build import parse_mbxml_string, MBXMLDeprecationWarning
 
     rom_path = _make_lorom(tmp_path)
     (tmp_path / "data.bin").write_bytes(b"\xCC" * 64)

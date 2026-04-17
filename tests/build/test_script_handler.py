@@ -4,11 +4,11 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path, PurePosixPath
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec, Section, SectionKind, build, parse_project_toml,
 )
-from retrotool.mbuild.handlers import handle_script, BuildContext, WriteRange
-from tests.mbuild.conftest import _make_lorom
+from retrotool.build.handlers import handle_script, BuildContext, WriteRange
+from tests.build.conftest import _make_lorom
 
 
 _ASCII_TBL = "\n".join(f"{ord(c):02X}={c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcd") + "\n"
@@ -149,21 +149,21 @@ def test_script_sentinel_ptr_passthrough(tmp_path):
 
 
 def test_script_from_toml_and_labels(tmp_path):
-    """Full loop: project.toml with [[mbuild.labels]] → build → parse OK, fixups resolve."""
+    """Full loop: project.toml with [[build.labels]] → build → parse OK, fixups resolve."""
     rom_path = _make_lorom(tmp_path)
     (tmp_path / "t.tbl").write_text(_ASCII_TBL, encoding="utf-8")
     (tmp_path / "s.txt").write_text(
         "<<$C000:0[$100]>>\nA[FFC0@@audio]\n", encoding="utf-8",
     )
     (tmp_path / "project.toml").write_text(textwrap.dedent(f"""
-        [mbuild]
-        original = "{rom_path.name}"
+        [rom]
+        file = "{rom_path.name}"
 
-        [[mbuild.labels]]
+        [[rom.build.labels]]
         name = "audio"
         at = 0x230000
 
-        [[mbuild.sections]]
+        [[rom.build.sections]]
         kind = "script"
         file = "s.txt"
         table = "t.tbl"

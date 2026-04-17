@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from retrotool.mbuild.front_ends.mbxml import IncludeError, parse_mbxml
+from retrotool.build.front_ends.mbxml import IncludeError, parse_mbxml
 
 
 def test_include_splices_sections(tmp_path):

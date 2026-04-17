@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec,
     HandlerError,
     Section,

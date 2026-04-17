@@ -1,8 +1,8 @@
 """Tests for variable interpolation + condition evaluator (Phase 5.1/5.2)."""
 import pytest
 
-from retrotool.mbuild.front_ends.mbxml import parse_mbxml_string
-from retrotool.mbuild.interpolate import (
+from retrotool.build.front_ends.mbxml import parse_mbxml_string
+from retrotool.build.interpolate import (
     InterpolationError,
     build_vars,
     evaluate_condition,

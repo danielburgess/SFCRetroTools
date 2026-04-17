@@ -8,8 +8,8 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import BuildSpec, Section, SectionKind, build
-from retrotool.mbuild.prepare import parallel_prepare, prepare_bin, prepare_script
+from retrotool.build import BuildSpec, Section, SectionKind, build
+from retrotool.build.prepare import parallel_prepare, prepare_bin, prepare_script
 
 
 _ROM_SIZE = 0x80_000

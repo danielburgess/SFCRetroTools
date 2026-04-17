@@ -9,9 +9,9 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import BuildSpec, SectionKind
-from retrotool.mbuild.front_ends.mbxml import parse_mbxml, parse_mbxml_string
-from retrotool.mbuild.front_ends.schema import SchemaError
+from retrotool.build import BuildSpec, SectionKind
+from retrotool.build.front_ends.mbxml import parse_mbxml, parse_mbxml_string
+from retrotool.build.front_ends.schema import SchemaError
 
 
 MBUILD_SAMPLE = Path("/mnt/crucial/projects/MBuild/MBuild.MBXML")
@@ -169,7 +169,7 @@ def test_parses_real_mbuild_sample():
 
 # ---- deprecation handling --------------------------------------------------
 
-from retrotool.mbuild import (
+from retrotool.build import (
     MBXMLDeprecationWarning,
     migrate_mbxml,
     migrate_mbxml_string,

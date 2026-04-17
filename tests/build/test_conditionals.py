@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from retrotool.mbuild import build, parse_mbxml_string
-from tests.mbuild.conftest import _make_lorom
+from retrotool.build import build, parse_mbxml_string
+from tests.build.conftest import _make_lorom
 
 
 def _spec(tmp_path: Path, version: str) -> str:
