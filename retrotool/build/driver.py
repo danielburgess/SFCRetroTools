@@ -167,17 +167,36 @@ def _patch_checksum(rom: bytearray) -> Optional[int]:
 def _section_kinds_filter(
     only: Optional[set[str]], skip: Optional[set[str]]
 ) -> Optional[Callable[[Section], bool]]:
-    """Return a predicate(section) → True if the section should run."""
+    """Return a predicate(section) → True if the section should run.
+
+    Filter strings match either `section.kind.value` (e.g. "asar", "script")
+    or an individual section's identifier (`section.from_datadef` or the
+    `datadef:<name>` form of `section.source`). Lets callers cherry-pick
+    specific tables — e.g. `--only scene-desc-name` — without editing config.
+    """
     if not only and not skip:
         return None
     only_l = {s.lower() for s in (only or set())}
     skip_l = {s.lower() for s in (skip or set())}
 
+    def _ids(section: Section) -> set[str]:
+        ids: set[str] = {section.kind.value.lower()}
+        if section.from_datadef:
+            ids.add(section.from_datadef.lower())
+        if section.source:
+            # section.source is typically "datadef:<name>" or "file:line" —
+            # match either the raw string or the ":"-suffix (e.g. datadef name).
+            src = section.source.lower()
+            ids.add(src)
+            if ":" in src:
+                ids.add(src.split(":", 1)[1])
+        return ids
+
     def keep(section: Section) -> bool:
-        kind = section.kind.value.lower()
-        if only_l and kind not in only_l:
+        ids = _ids(section)
+        if only_l and ids.isdisjoint(only_l):
             return False
-        if kind in skip_l:
+        if skip_l and not ids.isdisjoint(skip_l):
             return False
         return True
 

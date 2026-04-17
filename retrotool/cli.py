@@ -236,9 +236,10 @@ def _build_parser() -> argparse.ArgumentParser:
     bb.add_argument("--diff", choices=["ips", "xdelta", "both"], default=None,
                     help="override spec diff setting")
     bb.add_argument("--only", default=None,
-                    help="comma-separated section kinds to run (e.g. asar,script)")
+                    help="comma-separated section kinds OR names to run "
+                         "(e.g. asar,script,scene-desc-name)")
     bb.add_argument("--skip", default=None,
-                    help="comma-separated section kinds to skip")
+                    help="comma-separated section kinds OR names to skip")
     bb.add_argument("-j", "--jobs", type=int, default=None,
                     help="parallel pre-encoding workers (default: serial); "
                          "1 = serial prepare phase, N = ProcessPoolExecutor cap")
