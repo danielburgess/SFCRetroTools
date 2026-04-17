@@ -1,28 +1,37 @@
 """`project.toml` front-end → `BuildSpec`.
 
-Accepts any TOML file containing an `[mbuild]` table. Downstream handlers,
-`build()`, and `extract()` are identical between the two front-ends.
+Reads the `[rom.build]` pipeline table. The source rom name + project name
+are pulled from `[rom]` (`file` → `original`, `name` → `name`) — they must
+not be redeclared in `[rom.build]`. Downstream handlers, `build()`, and
+`extract()` are identical between the two front-ends.
 
 Minimal example::
 
-    [mbuild]
-    original = "base.sfc"
+    [rom]
     name = "Demo"
+    file = "base.sfc"
+    mapping = "lorom"
+    size = "2M"
+
+    [rom.build]
     pad = true
     revbyteloc = 0x7FDB
     revision = "01"
 
-    [[mbuild.sections]]
+    [[rom.build.sections]]
     kind = "rep"
     offset = 0x100
     file = "patch.bin"
 
-    [[mbuild.sections]]
+    [[rom.build.sections]]
     kind = "bin"
     offset = 0x200000
     file = ["chunk_a.bin", "chunk_b.bin"]
     codec = "lzss-zamn"
     grow = "replace"
+
+Included fragments (`[rom.build].include = [...]`) contain `[rom.build]`
+only — no `[rom]` header. Parent wins for `original`/`name`/etc.
 
 TOML values may be plain integers, or hex strings (`"0x100"`, `"$1B:8000"`,
 `"11E3"` — MBuild's raw-hex convention is honored). `file` may be a string or
@@ -34,8 +43,9 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
-from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
-from retrotool.mbuild.front_ends.schema import SchemaError
+from retrotool.build.spec import BuildSpec, Section, SectionKind
+from retrotool.build.front_ends.schema import SchemaError
+from retrotool.build.interpolate import build_vars, interpolate
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -103,18 +113,48 @@ _BUILD_SCALAR_FIELDS = {
 }
 
 
-def parse_project_toml(path: Path | str) -> BuildSpec:
+def parse_project_toml(
+    path: Path | str,
+    *,
+    defines: Optional[dict[str, str]] = None,
+) -> BuildSpec:
     path = Path(path).resolve()
-    return _parse_project_toml(path, _seen=set())
+    return _parse_project_toml(path, _seen=set(), defines=defines)
 
 
-def _parse_project_toml(path: Path, *, _seen: set[Path]) -> BuildSpec:
+def _parse_project_toml(
+    path: Path, *, _seen: set[Path],
+    defines: Optional[dict[str, str]] = None,
+) -> BuildSpec:
     if path in _seen:
         raise SchemaError(f"include cycle detected at {path}")
     _seen = _seen | {path}
     with path.open("rb") as f:
         data = tomllib.load(f)
-    return parse_project_toml_dict(data, source_path=path, _seen=_seen)
+    return parse_project_toml_dict(
+        data, source_path=path, _seen=_seen, defines=defines,
+    )
+
+
+def _interpolate_tree(v: Any, vars: dict[str, str], *, source: str) -> Any:
+    """Recursively apply `${var}` substitution to every string value in `v`.
+
+    Preserves non-string scalars (int, bool) and container shapes. `if=`
+    expressions are left raw (interpolation happens at evaluation time).
+    """
+    if isinstance(v, str):
+        return interpolate(v, vars, source=source)
+    if isinstance(v, dict):
+        out: dict = {}
+        for k, val in v.items():
+            if k == "if":
+                out[k] = val  # defer interpolation
+            else:
+                out[k] = _interpolate_tree(val, vars, source=source)
+        return out
+    if isinstance(v, list):
+        return [_interpolate_tree(item, vars, source=source) for item in v]
+    return v
 
 
 def parse_project_toml_dict(
@@ -122,87 +162,146 @@ def parse_project_toml_dict(
     *,
     source_path: Optional[Path] = None,
     _seen: Optional[set[Path]] = None,
+    defines: Optional[dict[str, str]] = None,
 ) -> BuildSpec:
-    if "mbuild" not in data:
+    # Pipeline lives at [rom.build]. `original`/`name` are pulled from [rom]
+    # and must not appear in [rom.build]. Fragments (used via include) are
+    # permitted to omit [rom] entirely.
+    rom = data.get("rom") or {}
+    if not isinstance(rom, dict):
+        raise SchemaError("[rom] must be a table")
+
+    mb = rom.get("build")
+    if mb is None:
         raise SchemaError(
-            f"{source_path or '<dict>'}: project TOML has no [mbuild] table"
+            f"{source_path or '<dict>'}: project TOML has no [rom.build] table"
         )
-    mb = data["mbuild"]
     if not isinstance(mb, dict):
-        raise SchemaError("[mbuild] must be a table")
+        raise SchemaError("[rom.build] must be a table")
+
+    for forbidden in ("original", "name"):
+        if forbidden in mb:
+            raise SchemaError(
+                f"[rom.build].{forbidden} is not allowed — set [rom].{'file' if forbidden == 'original' else 'name'} instead"
+            )
 
     source = str(source_path) if source_path else "<toml>"
+
+    # Seed vars: name from [rom], version/revision from [rom.build]. Layer
+    # user defines on top, then interpolate every string in [rom.build].
+    seed_attrs: dict[str, str] = {}
+    if isinstance(rom.get("name"), str):
+        seed_attrs["name"] = rom["name"]
+    for k in ("version", "revision"):
+        if isinstance(mb.get(k), str):
+            seed_attrs[k] = mb[k]
+    vars = build_vars(seed_attrs, defines)
+    mb = _interpolate_tree(mb, vars, source=source)
+
+    original = None
+    if isinstance(rom.get("file"), str):
+        original = _coerce_path(rom["file"], "[rom].file")
+
     spec = BuildSpec(
-        original=_coerce_path(mb["original"], "[mbuild].original") if "original" in mb else None,
-        name=mb.get("name"),
+        original=original,
+        name=rom.get("name"),
         version=mb.get("version"),
         revision=mb.get("revision"),
-        revbyteloc=_coerce_offset(mb.get("revbyteloc"), "[mbuild].revbyteloc"),
-        path=_coerce_path(mb["path"], "[mbuild].path") if "path" in mb else None,
+        revbyteloc=_coerce_offset(mb.get("revbyteloc"), "[rom.build].revbyteloc"),
+        path=_coerce_path(mb["path"], "[rom.build].path") if "path" in mb else None,
         pad=bool(mb.get("pad", False)),
+        pad_byte=_coerce_offset(mb.get("pad-byte", mb.get("pad_byte", 0x00)), "[rom.build].pad-byte") or 0x00,
         diff=mb.get("diff"),
         source_path=PurePosixPath(source_path.as_posix()) if source_path else None,
+        vars=vars,
     )
 
     fs = mb.get("freespace", [])
     if fs:
         if not isinstance(fs, list):
-            raise SchemaError("[mbuild].freespace must be a list of [lo, hi] pairs")
+            raise SchemaError("[rom.build].freespace must be a list of [lo, hi] pairs")
         for i, pair in enumerate(fs):
             if not (isinstance(pair, list) and len(pair) == 2):
-                raise SchemaError(f"[mbuild].freespace[{i}] must be [lo, hi]")
-            lo = _coerce_offset(pair[0], f"[mbuild].freespace[{i}][0]")
-            hi = _coerce_offset(pair[1], f"[mbuild].freespace[{i}][1]")
+                raise SchemaError(f"[rom.build].freespace[{i}] must be [lo, hi]")
+            lo = _coerce_offset(pair[0], f"[rom.build].freespace[{i}][0]")
+            hi = _coerce_offset(pair[1], f"[rom.build].freespace[{i}][1]")
             if lo is None or hi is None or hi <= lo:
-                raise SchemaError(f"[mbuild].freespace[{i}] invalid range {pair!r}")
+                raise SchemaError(f"[rom.build].freespace[{i}] invalid range {pair!r}")
             spec.freespace.append((lo, hi))
 
     raw_labels = mb.get("labels", [])
     if raw_labels:
         if not isinstance(raw_labels, list):
-            raise SchemaError("[[mbuild.labels]] must be an array of tables")
+            raise SchemaError("[[rom.build.labels]] must be an array of tables")
         for i, lab in enumerate(raw_labels):
             if not isinstance(lab, dict):
-                raise SchemaError(f"[[mbuild.labels]][{i}] must be a table")
+                raise SchemaError(f"[[rom.build.labels]][{i}] must be a table")
             name = lab.get("name")
             if not isinstance(name, str) or not name:
-                raise SchemaError(f"[[mbuild.labels]][{i}] missing name=")
-            at = _coerce_offset(lab.get("at"), f"[[mbuild.labels]][{i}].at")
+                raise SchemaError(f"[[rom.build.labels]][{i}] missing name=")
+            at = _coerce_offset(lab.get("at"), f"[[rom.build.labels]][{i}].at")
             if at is None:
-                raise SchemaError(f"[[mbuild.labels]][{i}] missing at=")
+                raise SchemaError(f"[[rom.build.labels]][{i}] missing at=")
             spec.labels[name] = at
+
+    # Project-level defaults for DataDef sections: [rom.build.section.overflow],
+    # [rom.build.section.placement]. Inherited by every DataDef that declares a
+    # `[section]` sub-table but omits the corresponding key. Inline sections
+    # (`[[rom.build.sections]]`) are not affected.
+    sd = mb.get("section")
+    if sd is not None:
+        if not isinstance(sd, dict):
+            raise SchemaError("[rom.build.section] must be a table")
+        spec.section_defaults = dict(sd)
+
+    # `en_data_dir=` at the project root (outside [rom.build]) feeds the
+    # file-autodefault for DataDef sections. Pulled from the top-level dict
+    # here so resolver sees it without a separate ProjectConfig param.
+    en_dir = data.get("en_data_dir")
+    if isinstance(en_dir, str) and en_dir:
+        spec.en_data_dir = en_dir
+
+    raw_order = mb.get("order")
+    if raw_order is not None:
+        if not isinstance(raw_order, list) or not all(isinstance(x, str) for x in raw_order):
+            raise SchemaError("[rom.build].order must be a list of section names")
+        spec.order = list(raw_order)
 
     raw_sections = mb.get("sections", [])
     if not isinstance(raw_sections, list):
-        raise SchemaError("[[mbuild.sections]] must be an array of tables")
+        raise SchemaError("[[rom.build.sections]] must be an array of tables")
 
     for i, entry in enumerate(raw_sections):
         if not isinstance(entry, dict):
-            raise SchemaError(f"[[mbuild.sections]][{i}] must be a table")
+            raise SchemaError(f"[[rom.build.sections]][{i}] must be a table")
         spec.sections.append(_section_from_dict(entry, index=i, source=source))
 
-    # `[mbuild].include = ["tables/foo.toml", …]` splices sections from sibling
-    # TOML files. Each included file must itself contain a [mbuild] table; only
-    # the sections array is merged (parent header wins for original/name/etc).
+    # `[rom.build].include = ["tables/foo.toml", …]` splices sections from
+    # sibling TOML files. Each included file must itself contain [rom.build];
+    # only sections/freespace/labels are merged (parent wins on key clash).
     includes = mb.get("include", [])
     if includes:
         if not isinstance(includes, list):
-            raise SchemaError("[mbuild].include must be a list of paths")
+            raise SchemaError("[rom.build].include must be a list of paths")
         if source_path is None:
             raise SchemaError(
-                "[mbuild].include cannot be used when parsing from a dict "
+                "[rom.build].include cannot be used when parsing from a dict "
                 "without source_path (paths can't be resolved)"
             )
         base = source_path.parent
         seen = _seen if _seen is not None else {source_path.resolve()}
         for inc in includes:
             if not isinstance(inc, str):
-                raise SchemaError(f"[mbuild].include entry not a string: {inc!r}")
+                raise SchemaError(f"[rom.build].include entry not a string: {inc!r}")
             inc_path = (base / inc).resolve()
             if not inc_path.exists():
                 raise SchemaError(f"include not found: {inc_path}")
-            sub = _parse_project_toml(inc_path, _seen=seen)
+            sub = _parse_project_toml(inc_path, _seen=seen, defines=defines)
             spec.sections.extend(sub.sections)
+            # Merge freespace/labels from includes (parent wins on key clash).
+            spec.freespace.extend(sub.freespace)
+            for k, v in sub.labels.items():
+                spec.labels.setdefault(k, v)
 
     return spec
 
@@ -210,13 +309,20 @@ def parse_project_toml_dict(
 def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
     kind_str = entry.get("kind")
     if not kind_str:
-        raise SchemaError(f"{source}: [[mbuild.sections]][{index}] missing kind=")
+        raise SchemaError(f"{source}: [[rom.build.sections]][{index}] missing kind=")
     try:
         kind = SectionKind(kind_str)
     except ValueError as e:
         raise SchemaError(f"{source}: unknown kind={kind_str!r} at sections[{index}]") from e
 
-    field_prefix = f"[[mbuild.sections]][{index}]"
+    field_prefix = f"[[rom.build.sections]][{index}]"
+
+    if "datadef" in entry:
+        raise SchemaError(
+            f"{field_prefix}: `datadef=` is no longer accepted. To reference a "
+            f"DataDef, add a `[section]` sub-table to its tables/<name>.toml — "
+            f"it will be auto-included in the build pipeline."
+        )
     files = _coerce_files(entry.get("file"), f"{field_prefix}.file")
     # Also accept `src` for element-parity with MBXML <libsfx src=…>.
     if not files and "src" in entry:

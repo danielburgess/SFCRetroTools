@@ -113,12 +113,43 @@ def _resolve_spec_path(path: Path) -> tuple[Path, str]:
     raise ValueError(f"unrecognized spec file extension: {path.suffix!r}")
 
 
-def _load_spec(path: Path):
-    from retrotool.mbuild import parse_mbxml, parse_project_toml
+def _load_spec(path: Path, *, defines: Optional[dict[str, str]] = None):
+    from retrotool.build import parse_mbxml, parse_project_toml, apply_datadefs_to_spec
     spec_file, kind = _resolve_spec_path(path)
     if kind == "mbxml":
-        return parse_mbxml(spec_file), spec_file
-    return parse_project_toml(spec_file), spec_file
+        return parse_mbxml(spec_file, defines=defines), spec_file
+    spec = parse_project_toml(spec_file, defines=defines)
+    # Auto-include DataDefs with a `[section]` sub-table from `data_dirs`.
+    # Inline `[[rom.build.sections]]` and DataDef-derived sections are merged
+    # and ordered (by offset, or by `[rom.build].order = [...]`). A section
+    # is always defined in exactly one place — no cross-file duplication.
+    from retrotool.project.loader import load_project, load_datadefs
+    try:
+        project = load_project(spec_file)
+    except (FileNotFoundError, ValueError):
+        project = None  # bare TOML without `[rom]` — inline-only build
+    if project is not None and project.data_dirs:
+        datadefs = load_datadefs(project)
+        apply_datadefs_to_spec(spec, datadefs, order=spec.order)
+    elif spec.order:
+        # No DataDefs but order= set — still honor it across inline sections.
+        apply_datadefs_to_spec(spec, [], order=spec.order)
+    return spec, spec_file
+
+
+def _parse_defines(pairs: Optional[list[str]]) -> dict[str, str]:
+    """Parse `-D name=value` flags. Multiple `-D` accepted; last value wins
+    on duplicate keys. Raises SystemExit for malformed entries."""
+    out: dict[str, str] = {}
+    for item in pairs or ():
+        if "=" not in item:
+            raise SystemExit(f"-D expects name=value, got: {item!r}")
+        k, _, v = item.partition("=")
+        k = k.strip()
+        if not k:
+            raise SystemExit(f"-D expects non-empty name, got: {item!r}")
+        out[k] = v
+    return out
 
 
 def _split_csv(s: Optional[str]) -> Optional[set[str]]:
@@ -129,8 +160,10 @@ def _split_csv(s: Optional[str]) -> Optional[set[str]]:
 
 def _cmd_mbuild_build(args: argparse.Namespace) -> int:
     from retrotool.core.cache import BuildCache
-    from retrotool.mbuild import build
-    spec, spec_file = _load_spec(Path(args.path))
+    from retrotool.build import build
+    spec, spec_file = _load_spec(
+        Path(args.path), defines=_parse_defines(args.define),
+    )
     if args.diff is not None:
         spec.diff = args.diff
     source_root = spec_file.parent
@@ -161,8 +194,10 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
 
 
 def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
-    from retrotool.mbuild import extract
-    spec, spec_file = _load_spec(Path(args.path))
+    from retrotool.build import extract
+    spec, spec_file = _load_spec(
+        Path(args.path), defines=_parse_defines(args.define),
+    )
     source_root = spec_file.parent
     dest = Path(args.dest).resolve() if args.dest else None
     result = extract(
@@ -177,7 +212,7 @@ def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
 
 
 def _cmd_mbuild_migrate(args: argparse.Namespace) -> int:
-    from retrotool.mbuild import migrate_mbxml
+    from retrotool.build import migrate_mbxml
     path = Path(args.path)
     if path.is_dir() or path.suffix.lower() not in (".mbxml", ".xml"):
         raise ValueError("migrate requires an .mbxml/.xml file")
@@ -207,6 +242,10 @@ def _build_parser() -> argparse.ArgumentParser:
     bb.add_argument("-j", "--jobs", type=int, default=None,
                     help="parallel pre-encoding workers (default: serial); "
                          "1 = serial prepare phase, N = ProcessPoolExecutor cap")
+    bb.add_argument("-D", "--define", action="append", default=None,
+                    metavar="NAME=VALUE",
+                    help="override a spec variable (e.g. -D version=en); "
+                         "repeatable. Applies to both MBXML and TOML front-ends.")
     bb.set_defaults(func=_cmd_mbuild_build)
 
     # extract
@@ -217,6 +256,10 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="comma-separated section kinds to extract")
     ex.add_argument("--skip", default=None,
                     help="comma-separated section kinds to skip")
+    ex.add_argument("-D", "--define", action="append", default=None,
+                    metavar="NAME=VALUE",
+                    help="override a spec variable (e.g. -D version=en); "
+                         "repeatable.")
     ex.set_defaults(func=_cmd_mbuild_extract)
 
     # migrate

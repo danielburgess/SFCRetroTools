@@ -1,31 +1,36 @@
-"""retrotool.mbuild — unified build pipeline (MBXML + project.toml front-ends).
+"""retrotool.build — unified build pipeline (MBXML + project.toml front-ends).
 
 Canonical in-memory form: `BuildSpec` (see `spec`).
 Front-ends: `front_ends.mbxml` (MBuild 1.29 compatible), `front_ends.project_toml` (TBD).
 """
-from retrotool.mbuild.spec import (
+from retrotool.build.spec import (
     BuildSpec,
     Section,
     SectionKind,
     OP_REPLACE,
     OP_INSERT,
 )
-from retrotool.mbuild.build import BuildResult, SectionResult, build
-from retrotool.mbuild.diff import DiffError, DiffResult, apply_ips, write_diff, write_ips, write_xdelta, xdelta_available
-from retrotool.mbuild.extract import ExtractedSection, ExtractResult, extract
-from retrotool.mbuild.handlers import HandlerError
-from retrotool.mbuild.front_ends.mbxml import (
+from retrotool.build.driver import BuildResult, SectionResult, build
+from retrotool.build.diff import DiffError, DiffResult, apply_ips, write_diff, write_ips, write_xdelta, xdelta_available
+from retrotool.build.extract import ExtractedSection, ExtractResult, extract
+from retrotool.build.handlers import HandlerError
+from retrotool.build.front_ends.mbxml import (
     MBXMLDeprecationWarning,
     migrate_mbxml,
     migrate_mbxml_string,
     parse_mbxml,
     parse_mbxml_string,
 )
-from retrotool.mbuild.front_ends.project_toml import (
+from retrotool.build.front_ends.project_toml import (
     parse_project_toml,
     parse_project_toml_dict,
 )
-from retrotool.mbuild import overflow
+from retrotool.build.resolve import (
+    apply_datadefs_to_spec,
+    merge_sections,
+    sections_from_datadefs,
+)
+from retrotool.build import overflow
 
 __all__ = [
     "BuildSpec",
@@ -54,5 +59,8 @@ __all__ = [
     "migrate_mbxml_string",
     "parse_project_toml",
     "parse_project_toml_dict",
+    "apply_datadefs_to_spec",
+    "merge_sections",
+    "sections_from_datadefs",
     "overflow",
 ]

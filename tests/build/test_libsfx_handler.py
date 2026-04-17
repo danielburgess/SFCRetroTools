@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from retrotool.mbuild.build import build
-from retrotool.mbuild.front_ends.mbxml import parse_mbxml_string
-from retrotool.mbuild.handlers import HandlerError, handle_libsfx
-from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
+from retrotool.build.driver import build
+from retrotool.build.front_ends.mbxml import parse_mbxml_string
+from retrotool.build.handlers import HandlerError, handle_libsfx
+from retrotool.build.spec import BuildSpec, Section, SectionKind
 
 
 def _section(src: str = "game_src", **attrs) -> Section:

@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec,
     DiffError,
     Section,
@@ -26,7 +26,7 @@ def xdelta_binary():
     """Runtime-evaluated skip — avoids freezing toolchain state at collection."""
     if not xdelta_available():
         pytest.skip("xdelta3 binary not available")
-from retrotool.mbuild.diff import _encode_ips_runs, _pack_ips_record
+from retrotool.build.diff import _encode_ips_runs, _pack_ips_record
 
 
 _ROM_SIZE = 0x80_000
@@ -169,7 +169,7 @@ def test_build_with_diff_both_emits_both(tmp_path):
 
 def test_xdelta_graceful_skip_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(shutil, "which", lambda _: None)
-    monkeypatch.setattr("retrotool.mbuild.diff._xdelta_bundled", lambda: None)
+    monkeypatch.setattr("retrotool.build.diff._xdelta_bundled", lambda: None)
     d = write_xdelta(
         tmp_path / "orig.sfc", tmp_path / "mod.sfc", tmp_path / "out.xdelta",
         required=False,
@@ -180,7 +180,7 @@ def test_xdelta_graceful_skip_when_missing(monkeypatch, tmp_path):
 
 def test_xdelta_required_raises_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(shutil, "which", lambda _: None)
-    monkeypatch.setattr("retrotool.mbuild.diff._xdelta_bundled", lambda: None)
+    monkeypatch.setattr("retrotool.build.diff._xdelta_bundled", lambda: None)
     with pytest.raises(DiffError, match="xdelta3"):
         write_xdelta(tmp_path / "o.sfc", tmp_path / "m.sfc",
                      tmp_path / "x.xdelta", required=True)
@@ -192,7 +192,7 @@ def test_xdelta_required_raises_when_missing(monkeypatch, tmp_path):
 def test_write_diff_rejects_header_mismatch(tmp_path):
     """If one ROM has an SMC header and the other doesn't, every IPS offset
     would be shifted by 512 bytes — `write_diff` must surface this loudly."""
-    from retrotool.mbuild.diff import write_diff
+    from retrotool.build.diff import write_diff
     headerless = _make_lorom(tmp_path, marker=b"NOHEADER")
     headered = tmp_path / "headered.sfc"
     headered.write_bytes(b"\x00" * 512 + headerless.read_bytes())  # prepend SMC
@@ -202,7 +202,7 @@ def test_write_diff_rejects_header_mismatch(tmp_path):
 
 
 def test_write_diff_passes_when_both_headerless(tmp_path):
-    from retrotool.mbuild.diff import write_diff
+    from retrotool.build.diff import write_diff
     a = _make_lorom(tmp_path, marker=b"A")
     b = _make_lorom(tmp_path, marker=b"B")
     d = write_diff("ips", original_path=a, modified_path=b,
@@ -211,7 +211,7 @@ def test_write_diff_passes_when_both_headerless(tmp_path):
 
 
 def test_write_diff_passes_when_both_headered(tmp_path):
-    from retrotool.mbuild.diff import write_diff
+    from retrotool.build.diff import write_diff
     body_a = _make_lorom(tmp_path, marker=b"AA").read_bytes()
     body_b = _make_lorom(tmp_path, marker=b"BB").read_bytes()
     a = tmp_path / "ha.sfc"; a.write_bytes(b"\x00" * 512 + body_a)

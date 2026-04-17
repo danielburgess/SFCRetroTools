@@ -119,11 +119,16 @@ class Packed:
     the first tail write. Strategies that don't split set it to
     `len(entry.encoded)` (everything is inline).
     """
-    inline: bytes
+    inline: Optional[bytes]  # None when preserve_source=True
     tails: list[TailWrite] = field(default_factory=list)
     overflow_used: bool = False
     fixups: list[PackFixup] = field(default_factory=list)
     source_split: int = 0
+    # Strategy signals the caller to leave the original ROM bytes intact for
+    # this entry (e.g. slot smaller than any redirect stub). Used by inline-
+    # redirect when max_inline < stub_size — mirrors lm3.py "skip & preserve"
+    # behavior for shared-region entries reached only via external pins.
+    preserve_source: bool = False
 
 
 class OverflowStrategy(ABC):
@@ -241,10 +246,11 @@ class InlineRedirectStrategy(OverflowStrategy):
                 f"{entry.id}: inline-redirect needs an allocator for overflow tail"
             )
         if entry.max_inline < self.stub_size:
-            raise OverflowError(
-                f"{entry.id}: max_inline {entry.max_inline} < redirect stub "
-                f"size {self.stub_size}"
-            )
+            # Slot too small for an FFC0 redirect stub. Mirror lm3.py
+            # behavior: preserve the source ROM bytes for this entry (the
+            # game typically reaches such entries only via external pins,
+            # so overwriting them would break cross-entry redirects).
+            return Packed(inline=None, preserve_source=True)
 
         budget = entry.max_inline - self.stub_size
         if self.splitter is not None:

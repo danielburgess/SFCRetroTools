@@ -412,3 +412,80 @@ def encode_script_file(
                 )
 
     return encoded_entries
+
+
+# ---- Windowed script encoder ---------------------------------------------
+
+_WINDOW_ENTRY_HEADER_RE = re.compile(r'^(<<\$[^>]+>>)', re.MULTILINE)
+_WINDOW_BLOCK_RE = re.compile(
+    r'<<<window\[(\d+)\]:\$([0-9A-Fa-f]+)-\$([0-9A-Fa-f]+)>>>\s*\n(.*?)'
+    r'(?=<<<window|<<\$|$)',
+    re.DOTALL,
+)
+
+
+def encode_windowed_script_file(
+    script_file: Union[str, Path],
+    table_filename: Union[str, Path],
+    *,
+    fallback_table: Optional[Union[str, Path]] = None,
+) -> list[Optional[list[tuple[int, int, bytes]]]]:
+    """Parse a windowed event-script file.
+
+    Each entry may contain zero or more
+    ``<<<window[N]:$START-$END>>>`` blocks. Returns a list indexed by header
+    ``:N``; each slot is either ``None`` (no windows — pure bytecode) or a
+    list of ``(start, end, encoded_bytes)`` triples. Encoded bytes exclude
+    any trailing ``0x00`` terminator — the redirect back into original ROM
+    already lands on the source [end] byte.
+    """
+    tbl = Table(str(table_filename))
+    fb_tbl = Table(str(fallback_table)) if fallback_table else None
+    text = _read_script_text(Path(script_file))
+
+    parts = _WINDOW_ENTRY_HEADER_RE.split(text)
+    parsed: dict[int, list[tuple[int, int, str]]] = {}
+    current_header: Optional[str] = None
+    for part in parts:
+        m = _WINDOW_ENTRY_HEADER_RE.match(part)
+        if m:
+            current_header = part
+            continue
+        if current_header is None:
+            continue
+        rest = part
+        header = current_header
+        idx_match = re.search(r':(\d+)', header)
+        if not idx_match:
+            current_header = None
+            continue
+        header_idx = int(idx_match.group(1))
+        windows: list[tuple[int, int, str]] = []
+        for wm in _WINDOW_BLOCK_RE.finditer(rest):
+            start = int(wm.group(2), 16)
+            end = int(wm.group(3), 16)
+            content = wm.group(4).rstrip('\n\r\t ')
+            windows.append((start, end, content))
+        if windows:
+            parsed[header_idx] = windows
+        current_header = None
+
+    result: list[Optional[list[tuple[int, int, bytes]]]] = []
+    if not parsed:
+        return result
+    max_idx = max(parsed)
+    for entry_idx in range(max_idx + 1):
+        if entry_idx not in parsed:
+            result.append(None)
+            continue
+        encoded_windows: list[tuple[int, int, bytes]] = []
+        for start, end, content in parsed[entry_idx]:
+            if not content:
+                encoded_windows.append((start, end, b''))
+                continue
+            encoded, _, _ = encode_text(content, tbl, fallback_table=fb_tbl)
+            if encoded.endswith(b'\x00'):
+                encoded = encoded[:-1]
+            encoded_windows.append((start, end, encoded))
+        result.append(encoded_windows)
+    return result

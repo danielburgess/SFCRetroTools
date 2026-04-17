@@ -12,13 +12,13 @@ import defusedxml.ElementTree as DET  # parsing — rejects entity-expansion att
 from pathlib import Path, PurePosixPath
 from typing import Literal, Optional
 
-from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
-from retrotool.mbuild.front_ends.schema import (
+from retrotool.build.spec import BuildSpec, Section, SectionKind
+from retrotool.build.front_ends.schema import (
     SchemaError,
     validate_build_attrs,
     validate_section_attrs,
 )
-from retrotool.mbuild.interpolate import build_vars, interpolate_attrs
+from retrotool.build.interpolate import build_vars, interpolate_attrs
 
 
 class MBXMLDeprecationWarning(DeprecationWarning):
@@ -232,6 +232,30 @@ def _build_from_root(
                 src, parent=source_path, strict=strict,
                 deprecations=deprecations, vars=vars, seen={source_path.resolve()},
             ))
+            continue
+        if child.tag == "freespace":
+            child_attrs = interpolate_attrs(
+                dict(child.attrib), vars, source=str(source_path)
+            )
+            lo = _parse_offset(child_attrs.get("lo"))
+            hi = _parse_offset(child_attrs.get("hi"))
+            if lo is None or hi is None or hi <= lo:
+                raise SchemaError(
+                    f"{source_path}: <freespace> requires lo= and hi= with hi > lo"
+                )
+            spec.freespace.append((lo, hi))
+            continue
+        if child.tag == "label":
+            child_attrs = interpolate_attrs(
+                dict(child.attrib), vars, source=str(source_path)
+            )
+            name = child_attrs.get("name")
+            at = _parse_offset(child_attrs.get("at"))
+            if not name or at is None:
+                raise SchemaError(
+                    f"{source_path}: <label> requires name= and at="
+                )
+            spec.labels[name] = at
             continue
         spec.sections.append(
             _section_from_element(

@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from retrotool.mbuild import (
+from retrotool.build import (
     BuildSpec, HandlerError, Section, SectionKind, build, extract,
     parse_mbxml_string, parse_project_toml_dict,
 )
@@ -95,12 +95,12 @@ def test_fixed_records_mbxml_attrs_parsed():
 
 def test_fixed_records_toml_attrs_parsed():
     spec = parse_project_toml_dict({
-        "mbuild": {
+        "rom": {"build": {
             "sections": [{
                 "kind": "fixed-records", "file": "t.bin",
                 "offset": "0x100", "stride": 4, "count": 2,
             }]
-        }
+        }}
     })
     s = spec.sections[0]
     assert s.kind is SectionKind.FIXED_RECORDS

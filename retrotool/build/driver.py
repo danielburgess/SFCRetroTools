@@ -17,11 +17,11 @@ from typing import Callable, Optional
 
 from retrotool.core.cache import BuildCache, sha256_file, sha256_many
 from retrotool.core.rom import SMC_HEADER_SIZE, _strip_smc_header, detect_header
-from retrotool.mbuild.diff import DiffResult, write_diff
-from retrotool.mbuild.handlers import BuildContext, HandlerError, WriteRange, get_handler
-from retrotool.mbuild.overflow import FreespaceAllocator
-from retrotool.mbuild.interpolate import evaluate_condition
-from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
+from retrotool.build.diff import DiffResult, write_diff
+from retrotool.build.handlers import BuildContext, HandlerError, WriteRange, get_handler
+from retrotool.build.overflow import FreespaceAllocator
+from retrotool.build.interpolate import evaluate_condition
+from retrotool.build.spec import BuildSpec, Section, SectionKind
 
 
 # Section kinds with single-range writes (offset+length deterministic from
@@ -130,13 +130,14 @@ _SNES_PAD_SIZES = [
 ]
 
 
-def _pad_to_next_size(rom: bytearray) -> int:
-    """Pad with 0x00 to the next valid SNES ROM size. Returns final size."""
+def _pad_to_next_size(rom: bytearray, pad_byte: int = 0x00) -> int:
+    """Pad with `pad_byte` to the next valid SNES ROM size. Returns final size."""
     cur = len(rom)
+    fill = bytes([pad_byte & 0xFF])
     for size in _SNES_PAD_SIZES:
         if cur <= size:
             if size != cur:
-                rom.extend(b"\x00" * (size - cur))
+                rom.extend(fill * (size - cur))
             return size
     raise HandlerError(f"ROM size {cur:#x} exceeds max supported ({_SNES_PAD_SIZES[-1]:#x})")
 
@@ -229,6 +230,12 @@ def build(
         raw = original_rom.read_bytes()
         smc, body = _strip_smc_header(raw)
         rom = bytearray(body)
+        # Pre-expand ROM to cover declared freespace using pad_byte, so gap fill
+        # between source tail and first section write matches project expectations.
+        if spec.freespace:
+            hi_max = max(hi for _, hi in spec.freespace)
+            if hi_max > len(rom):
+                rom.extend(bytes([spec.pad_byte & 0xFF]) * (hi_max - len(rom)))
 
     # Resolve build-files root: source_root + spec.path (if provided).
     files_root = source_root
@@ -236,7 +243,7 @@ def build(
         files_root = (source_root / Path(str(spec.path))).resolve()
 
     if parallel is not None:
-        from retrotool.mbuild.prepare import parallel_prepare
+        from retrotool.build.prepare import parallel_prepare
         parallel_prepare(spec, files_root, max_workers=parallel)
 
     ctx = BuildContext(
@@ -310,7 +317,7 @@ def build(
         rom[spec.revbyteloc] = rev_byte & 0xFF
 
     if spec.pad:
-        _pad_to_next_size(rom)
+        _pad_to_next_size(rom, spec.pad_byte)
 
     csum = _patch_checksum(rom)
 

@@ -39,7 +39,7 @@ Jupyter notebook; nothing is hidden behind the CLI. In the same codebase you
 can mix:
 
 - **`project.toml` projects** — retrotool-native layout (`[build.libsfx]`,
-  `[mbuild]`, per-table `tables/*.toml`).
+  `[build]`, per-table `tables/*.toml`).
 - **MBXML specs** — MBuild 1.29-compatible, auto-migrated; drop-in for
   existing projects.
 - **libSFX projects** — ca65/ld65 + libSFX runtime, scaffolded or adopted.
@@ -228,7 +228,7 @@ LLM-assisted reverse-engineering scaffolding.
 
 ## MBXML builds
 
-`retrotool.mbuild` is an MBuild 1.29-compatible build pipeline plus extensions.
+`retrotool.build` is an MBuild 1.29-compatible build pipeline plus extensions.
 Every element on a build spec describes one piece of ROM data; the same spec
 drives **build** (files → ROM) and **extract** (ROM → files).
 
@@ -281,7 +281,7 @@ See `examples/mbxml/demo.mbxml` for a walkthrough.
 
 ### Project.toml front-end
 
-The same pipeline accepts the retrotool-idiomatic `[mbuild]` table in a
+The same pipeline accepts the retrotool-idiomatic `[build]` table in a
 `project.toml`. Handlers, cache, extract are identical — pick whichever
 front-end you prefer per project, or reference MBXML fragments from
 `project.toml` via `<include>`.

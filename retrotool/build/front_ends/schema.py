@@ -4,7 +4,7 @@ Catch typos, wrong types, unknown attrs (strict mode) before handlers run."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from retrotool.mbuild.spec import SectionKind
+from retrotool.build.spec import SectionKind
 
 
 # Attributes on <build> root.
@@ -107,6 +107,13 @@ SECTION_ATTRS: dict[SectionKind, AttrSpec] = {
     SectionKind.FIXED_RECORDS: AttrSpec(
         required=frozenset({"offset", "file"}),
         optional=frozenset({"stride", "count", "fields", "size"}) | _SHARED_EXT,
+    ),
+    SectionKind.WINDOWED_SCRIPT: AttrSpec(
+        required=frozenset({"file", "pointer-table", "count", "table"}),
+        optional=frozenset({
+            "fallback-table", "pointer-size", "terminator",
+            "overflow",
+        }) | _SHARED_EXT,
     ),
 }
 

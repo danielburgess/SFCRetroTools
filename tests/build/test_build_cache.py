@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from retrotool.core.cache import BuildCache
-from retrotool.mbuild import BuildSpec, Section, SectionKind, build
-from tests.mbuild.conftest import _make_lorom
+from retrotool.build import BuildSpec, Section, SectionKind, build
+from tests.build.conftest import _make_lorom
 
 
 def _spec(tmp_path: Path, *, init_file: bool = True) -> BuildSpec:
@@ -92,8 +92,8 @@ def test_no_cache_means_no_hits(tmp_path):
 
 def test_multi_range_writes_frame_roundtrip(tmp_path):
     """Handlers may return list[WriteRange]; cache must frame+replay every range."""
-    from retrotool.mbuild.build import _pack_writes, _unpack_writes
-    from retrotool.mbuild.handlers import WriteRange
+    from retrotool.build.driver import _pack_writes, _unpack_writes
+    from retrotool.build.handlers import WriteRange
     rom = bytearray(0x200)
     rom[0x100:0x104] = b"\xAA\xBB\xCC\xDD"
     rom[0x180:0x183] = b"\x11\x22\x33"
@@ -105,7 +105,7 @@ def test_multi_range_writes_frame_roundtrip(tmp_path):
 
 def test_legacy_cache_artifact_rejected_cleanly(tmp_path):
     """Raw blobs (pre-v3 format) must raise a clear ValueError, not silently misread."""
-    from retrotool.mbuild.build import _unpack_writes
+    from retrotool.build.driver import _unpack_writes
     import pytest as _pt
     with _pt.raises(ValueError, match="magic"):
         _unpack_writes(b"\xAA\xBB\xCC\xDD")

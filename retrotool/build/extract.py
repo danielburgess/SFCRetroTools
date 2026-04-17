@@ -19,8 +19,8 @@ from time import perf_counter
 from typing import Callable, Optional
 
 from retrotool.core.rom import _strip_smc_header
-from retrotool.mbuild.handlers import HandlerError
-from retrotool.mbuild.spec import BuildSpec, Section, SectionKind
+from retrotool.build.handlers import HandlerError
+from retrotool.build.spec import BuildSpec, Section, SectionKind
 
 
 @dataclass
@@ -137,7 +137,7 @@ def extract_raw(rom: bytes, section: Section, dest_root: Path) -> ExtractedSecti
 def extract_graphics(rom: bytes, section: Section, dest_root: Path) -> ExtractedSection:
     """Mirror of handle_graphics: read ROM region, apply reverse bitplane
     transform, write to file. Phase 3 wires raw passthrough only."""
-    from retrotool.mbuild.handlers import bitplane_reverse
+    from retrotool.build.handlers import bitplane_reverse
 
     if section.offset is None:
         raise HandlerError(f"{section.source}: <graphics> requires offset")

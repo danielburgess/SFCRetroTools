@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
-from retrotool.mbuild.spec import Section, SectionKind
+from retrotool.build.spec import Section, SectionKind
 
 
 # ---- top-level prepare functions (picklable) -----------------------------
@@ -53,7 +53,7 @@ def prepare_bin(section: Section, root: Path) -> bytes:
 
 def prepare_graphics(section: Section, root: Path) -> bytes:
     """Pre-encode <graphics> bytes (raw passthrough today; bitplane reorder later)."""
-    from retrotool.mbuild.handlers import _BITPLANE_TRANSFORMS
+    from retrotool.build.handlers import _BITPLANE_TRANSFORMS
     data = _read_concat(section, root)
     key = (section.codec or "").lower()
     if key not in _BITPLANE_TRANSFORMS:
