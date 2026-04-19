@@ -19,6 +19,7 @@ from time import perf_counter
 from typing import Callable, Optional
 
 from retrotool.core.rom import _strip_smc_header
+from retrotool.build.driver import _section_kinds_filter
 from retrotool.build.handlers import HandlerError
 from retrotool.build.spec import BuildSpec, Section, SectionKind
 
@@ -356,6 +357,14 @@ def get_extract_handler(kind: SectionKind) -> Optional[ExtractFn]:
 
 # ---- driver ---------------------------------------------------------------
 
+def _planned_targets(section: Section, files_root: Path) -> list[Path]:
+    """Paths an extract handler would write for this section (no side effects)."""
+    out: list[Path] = []
+    for f in section.files:
+        out.append(_resolve(Path(str(f)), files_root))
+    return out
+
+
 def extract(
     spec: BuildSpec,
     *,
@@ -364,14 +373,20 @@ def extract(
     dest_root: Optional[Path] = None,
     only: Optional[set[str]] = None,
     skip: Optional[set[str]] = None,
+    confirm_existing: Optional[Callable[[list[Path]], bool]] = None,
 ) -> ExtractResult:
     """Run extract for every supported section in `spec`.
 
     `source_root` resolves spec.original. `dest_root` resolves output file= attrs;
     defaults to `source_root + spec.path` (mirrors build()).
 
-    `only` / `skip` filter sections by `kind`. Filtered-out sections are silently
-    omitted from the result."""
+    `only` / `skip` filter sections by kind, from_datadef, or source id.
+
+    `confirm_existing` (optional): callable invoked with the list of target
+    paths that already exist on disk. Return True to proceed with overwrites,
+    False to abort (raises HandlerError). When None, existing files are
+    overwritten silently — intended for programmatic callers that have their
+    own guard. CLI installs an interactive prompt here."""
     t0 = perf_counter()
     if original_rom is None:
         if spec.original is None:
@@ -389,15 +404,13 @@ def extract(
     base = dest_root if dest_root is not None else source_root
     files_root = (base / Path(str(spec.path))).resolve() if spec.path is not None else base
 
-    only_l = {s.lower() for s in (only or set())}
-    skip_l = {s.lower() for s in (skip or set())}
+    keep = _section_kinds_filter(only, skip)
 
-    results: list[ExtractedSection] = []
+    # Pre-pass: validate handlers + collect targets for overwrite check.
+    planned: list[Section] = []
+    existing: list[Path] = []
     for section in spec.sections:
-        kind = section.kind.value.lower()
-        if only_l and kind not in only_l:
-            continue
-        if kind in skip_l:
+        if keep is not None and not keep(section):
             continue
         handler = get_extract_handler(section.kind)
         if handler is None:
@@ -405,6 +418,20 @@ def extract(
                 f"{section.source}: no extract handler for <{section.kind.value}> "
                 "(landing in a later phase)"
             )
+        planned.append(section)
+        for p in _planned_targets(section, files_root):
+            if p.exists():
+                existing.append(p)
+
+    if existing and confirm_existing is not None:
+        if not confirm_existing(existing):
+            raise HandlerError(
+                f"extract aborted: {len(existing)} existing file(s) would be overwritten"
+            )
+
+    results: list[ExtractedSection] = []
+    for section in planned:
+        handler = get_extract_handler(section.kind)
         results.append(handler(body, section, files_root))
 
     return ExtractResult(sections=results, duration_ms=int((perf_counter() - t0) * 1000))

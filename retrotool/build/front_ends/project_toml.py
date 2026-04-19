@@ -261,6 +261,22 @@ def parse_project_toml_dict(
     if isinstance(en_dir, str) and en_dir:
         spec.en_data_dir = en_dir
 
+    # Generic `*_data_dir=` scalars → data_dirs_by_lang. Lets `extract --lang X`
+    # target any declared language without hardcoding which one the build uses.
+    for k, v in data.items():
+        if isinstance(k, str) and k.endswith("_data_dir") and isinstance(v, str) and v:
+            lang = k[:-len("_data_dir")].lower()
+            if lang:
+                spec.data_dirs_by_lang[lang] = v
+
+    # `[extract]` table — opt-in extract-phase config. Currently supports
+    # `default_lang = "xx"`; placeholder for future extract-only overrides.
+    ex = data.get("extract")
+    if ex is not None:
+        if not isinstance(ex, dict):
+            raise SchemaError("[extract] must be a table")
+        spec.extract_config = dict(ex)
+
     raw_order = mb.get("order")
     if raw_order is not None:
         if not isinstance(raw_order, list) or not all(isinstance(x, str) for x in raw_order):
