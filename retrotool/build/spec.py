@@ -146,6 +146,15 @@ class BuildSpec:
     # uses this to synthesize `{en_data_dir}/{datadef.name}.txt` when a
     # DataDef's `[section]` omits both `en_file=` and `file=`.
     en_data_dir: Optional[str] = None
+    # Generic `{lang}_data_dir=` scalars from project.toml top level (e.g.
+    # en_data_dir, jp_data_dir, de_data_dir). Used by `extract --lang X` to
+    # pick a destination root at runtime, independent of which lang the
+    # build pipeline treats as primary. Keys are lowercase lang codes.
+    data_dirs_by_lang: dict[str, str] = field(default_factory=dict)
+    # `[extract]` sub-table from project.toml. Currently only `default_lang`
+    # is consumed (picks data_dirs_by_lang[default_lang] when extract is
+    # invoked without --lang/--dest). Room for future extract-only config.
+    extract_config: dict = field(default_factory=dict)
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)

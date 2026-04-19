@@ -113,11 +113,22 @@ def _resolve_spec_path(path: Path) -> tuple[Path, str]:
     raise ValueError(f"unrecognized spec file extension: {path.suffix!r}")
 
 
-def _load_spec(path: Path, *, defines: Optional[dict[str, str]] = None):
+def _load_spec(
+    path: Path,
+    *,
+    defines: Optional[dict[str, str]] = None,
+    defer_datadefs: bool = False,
+):
+    """Parse spec. When `defer_datadefs=True`, returns (spec, spec_file,
+    finalize) — caller invokes `finalize()` after mutating spec.en_data_dir
+    to pick a datadef resolution root (used by `extract --lang`)."""
     from retrotool.build import parse_mbxml, parse_project_toml, apply_datadefs_to_spec
     spec_file, kind = _resolve_spec_path(path)
     if kind == "mbxml":
-        return parse_mbxml(spec_file, defines=defines), spec_file
+        spec = parse_mbxml(spec_file, defines=defines)
+        if defer_datadefs:
+            return spec, spec_file, (lambda: None)
+        return spec, spec_file
     spec = parse_project_toml(spec_file, defines=defines)
     # Auto-include DataDefs with a `[section]` sub-table from `data_dirs`.
     # Inline `[[rom.build.sections]]` and DataDef-derived sections are merged
@@ -128,12 +139,17 @@ def _load_spec(path: Path, *, defines: Optional[dict[str, str]] = None):
         project = load_project(spec_file)
     except (FileNotFoundError, ValueError):
         project = None  # bare TOML without `[rom]` — inline-only build
-    if project is not None and project.data_dirs:
-        datadefs = load_datadefs(project)
-        apply_datadefs_to_spec(spec, datadefs, order=spec.order)
-    elif spec.order:
-        # No DataDefs but order= set — still honor it across inline sections.
-        apply_datadefs_to_spec(spec, [], order=spec.order)
+
+    def _finalize():
+        if project is not None and project.data_dirs:
+            datadefs = load_datadefs(project)
+            apply_datadefs_to_spec(spec, datadefs, order=spec.order)
+        elif spec.order:
+            apply_datadefs_to_spec(spec, [], order=spec.order)
+
+    if defer_datadefs:
+        return spec, spec_file, _finalize
+    _finalize()
     return spec, spec_file
 
 
@@ -195,20 +211,97 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
 
 def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
     from retrotool.build import extract
-    spec, spec_file = _load_spec(
+    spec, spec_file, finalize = _load_spec(
         Path(args.path), defines=_parse_defines(args.define),
+        defer_datadefs=True,
     )
     source_root = spec_file.parent
+
+    # Resolve extract destination. Precedence:
+    #   --dest (absolute path, overrides everything)
+    #   --lang X  → spec.data_dirs_by_lang[X] is spliced into spec.en_data_dir
+    #              so DataDef file= auto-defaults land there.
+    #   [extract].default_lang in project.toml → same behavior as --lang.
+    #   Otherwise → error. Extract must be explicit; silent defaults have
+    #   clobbered translation files in the past.
     dest = Path(args.dest).resolve() if args.dest else None
-    result = extract(
-        spec, source_root=source_root, dest_root=dest,
-        only=_split_csv(args.only), skip=_split_csv(args.skip),
-    )
+    lang = args.lang
+    if not dest and not lang:
+        default_lang = spec.extract_config.get("default_lang")
+        if isinstance(default_lang, str) and default_lang:
+            lang = default_lang
+    if not dest and not lang:
+        sys.stderr.write(
+            "error: extract requires an explicit destination.\n"
+            "  pass --lang <code>  (resolved via `<code>_data_dir=` in project.toml)\n"
+            "  or --dest <path>    (absolute override)\n"
+            "  or set `[extract].default_lang = \"<code>\"` in the spec.\n"
+        )
+        return 2
+    if lang:
+        lang_key = lang.lower()
+        dir_ = spec.data_dirs_by_lang.get(lang_key)
+        if not dir_:
+            known = sorted(spec.data_dirs_by_lang.keys())
+            sys.stderr.write(
+                f"error: --lang {lang!r}: no `{lang_key}_data_dir=` scalar in "
+                f"project.toml (known langs: {known})\n"
+            )
+            return 2
+        # Splice the chosen lang dir in as the file-autodefault so all DataDef
+        # sections resolve under it.
+        spec.en_data_dir = dir_
+
+    # Resolve datadef sections now that en_data_dir reflects the chosen lang.
+    finalize()
+
+    confirm = _build_overwrite_confirmer(assume_yes=args.yes)
+
+    try:
+        result = extract(
+            spec, source_root=source_root, dest_root=dest,
+            only=_split_csv(args.only), skip=_split_csv(args.skip),
+            confirm_existing=confirm,
+        )
+    except Exception as e:
+        # Abort from confirm callback surfaces as HandlerError; keep CLI terse.
+        sys.stderr.write(f"error: {e}\n")
+        return 1
     total = sum(s.bytes_read for s in result.sections)
     print(f"sections:  {len(result.sections)}")
     print(f"bytes:     {total}")
     print(f"duration:  {result.duration_ms} ms")
     return 0
+
+
+def _build_overwrite_confirmer(*, assume_yes: bool):
+    """Return a `confirm_existing(paths) -> bool` for retrotool.build.extract.
+
+    `assume_yes`: bypass prompt (used by --yes/-y).
+    Non-interactive stdin: refuse overwrite (safe default for scripts/CI)."""
+    def _confirm(existing: list[Path]) -> bool:
+        if assume_yes:
+            return True
+        count = len(existing)
+        sys.stderr.write(
+            f"\nWARNING: extract would overwrite {count} existing file(s):\n"
+        )
+        preview = existing[:10]
+        for p in preview:
+            sys.stderr.write(f"  {p}\n")
+        if count > len(preview):
+            sys.stderr.write(f"  ... ({count - len(preview)} more)\n")
+        if not sys.stdin.isatty():
+            sys.stderr.write(
+                "stdin is not a TTY — refusing to overwrite. "
+                "Re-run with --yes to confirm.\n"
+            )
+            return False
+        sys.stderr.write("Proceed with overwrite? [y/N] ")
+        sys.stderr.flush()
+        reply = sys.stdin.readline().strip().lower()
+        return reply in ("y", "yes")
+    return _confirm
 
 
 def _cmd_mbuild_migrate(args: argparse.Namespace) -> int:
@@ -252,11 +345,20 @@ def _build_parser() -> argparse.ArgumentParser:
     # extract
     ex = sub.add_parser("extract", help="extract ROM data to files per spec")
     ex.add_argument("path", help=".mbxml file, .toml file, or directory containing one")
-    ex.add_argument("--dest", help="destination root (default: spec dir + spec.path)")
+    ex.add_argument("--lang", default=None,
+                    help="language code (resolved via `<code>_data_dir=` in "
+                         "project.toml, e.g. en, jp). Mutually exclusive with --dest.")
+    ex.add_argument("--dest",
+                    help="destination root (absolute override). Mutually exclusive "
+                         "with --lang. Extract is explicit — one of --lang / --dest "
+                         "is required unless `[extract].default_lang` is set in the spec.")
+    ex.add_argument("-y", "--yes", action="store_true",
+                    help="skip the interactive confirmation prompt when extraction "
+                         "would overwrite existing files.")
     ex.add_argument("--only", default=None,
-                    help="comma-separated section kinds to extract")
+                    help="comma-separated section kinds OR names to extract")
     ex.add_argument("--skip", default=None,
-                    help="comma-separated section kinds to skip")
+                    help="comma-separated section kinds OR names to skip")
     ex.add_argument("-D", "--define", action="append", default=None,
                     metavar="NAME=VALUE",
                     help="override a spec variable (e.g. -D version=en); "
