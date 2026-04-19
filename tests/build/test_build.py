@@ -248,3 +248,75 @@ def test_skip_excludes_kind(tmp_path):
     body = out.read_bytes()
     assert body[0x500:0x502] == b"\x11\x22"
     assert body[0x510:0x512] == b"\x00\x00"
+
+
+def test_only_matches_inline_alias_and_name(tmp_path):
+    """Inline sections are matchable by `alias=` or `name=` attr."""
+    rom_path = _make_lorom(tmp_path)
+    (tmp_path / "a.bin").write_bytes(b"\x11\x22")
+    (tmp_path / "b.bin").write_bytes(b"\x33\x44")
+    (tmp_path / "c.bin").write_bytes(b"\x55\x66")
+    spec = BuildSpec(sections=[
+        Section(kind=SectionKind.BIN, offset=0x500,
+                files=[PurePosixPath("a.bin")], attrs={"alias": "font"}),
+        Section(kind=SectionKind.BIN, offset=0x510,
+                files=[PurePosixPath("b.bin")], attrs={"name": "gfx"}),
+        Section(kind=SectionKind.BIN, offset=0x520,
+                files=[PurePosixPath("c.bin")]),
+    ])
+    out = tmp_path / "out.sfc"
+    build(spec, source_root=tmp_path, out_path=out,
+          original_rom=rom_path, only={"font", "gfx"})
+    body = out.read_bytes()
+    assert body[0x500:0x502] == b"\x11\x22"  # alias=font — ran
+    assert body[0x510:0x512] == b"\x33\x44"  # name=gfx — ran
+    assert body[0x520:0x522] == b"\x00\x00"  # unaliased — skipped
+
+
+def test_only_shared_alias_builds_all_matching(tmp_path):
+    """Multiple inline sections can share the same `alias=` — all of them
+    build together when the shared alias is passed to --only."""
+    rom_path = _make_lorom(tmp_path)
+    (tmp_path / "a.bin").write_bytes(b"\x11\x22")
+    (tmp_path / "b.bin").write_bytes(b"\x33\x44")
+    (tmp_path / "c.bin").write_bytes(b"\x55\x66")
+    spec = BuildSpec(sections=[
+        Section(kind=SectionKind.BIN, offset=0x500,
+                files=[PurePosixPath("a.bin")], attrs={"alias": "title"}),
+        Section(kind=SectionKind.BIN, offset=0x510,
+                files=[PurePosixPath("b.bin")], attrs={"alias": "title"}),
+        Section(kind=SectionKind.BIN, offset=0x520,
+                files=[PurePosixPath("c.bin")], attrs={"alias": "font"}),
+    ])
+    out = tmp_path / "out.sfc"
+    build(spec, source_root=tmp_path, out_path=out,
+          original_rom=rom_path, only={"title"})
+    body = out.read_bytes()
+    assert body[0x500:0x502] == b"\x11\x22"  # title #1
+    assert body[0x510:0x512] == b"\x33\x44"  # title #2
+    assert body[0x520:0x522] == b"\x00\x00"  # font — not selected
+
+
+def test_only_matches_positional_section_alias(tmp_path):
+    """Inline sections without alias/name are addressable by index:
+    `sections[N]` (matches section.source suffix) and `section[N]` (singular)."""
+    rom_path = _make_lorom(tmp_path)
+    (tmp_path / "a.bin").write_bytes(b"\x11\x22")
+    (tmp_path / "b.bin").write_bytes(b"\x33\x44")
+    (tmp_path / "c.bin").write_bytes(b"\x55\x66")
+    spec = BuildSpec(sections=[
+        Section(kind=SectionKind.BIN, offset=0x500,
+                files=[PurePosixPath("a.bin")], source="p.toml:sections[0]"),
+        Section(kind=SectionKind.BIN, offset=0x510,
+                files=[PurePosixPath("b.bin")], source="p.toml:sections[1]"),
+        Section(kind=SectionKind.BIN, offset=0x520,
+                files=[PurePosixPath("c.bin")], source="p.toml:sections[2]"),
+    ])
+    out = tmp_path / "out.sfc"
+    # `sections[0]` (plural, from source) and `section[2]` (singular alias).
+    build(spec, source_root=tmp_path, out_path=out,
+          original_rom=rom_path, only={"sections[0]", "section[2]"})
+    body = out.read_bytes()
+    assert body[0x500:0x502] == b"\x11\x22"
+    assert body[0x510:0x512] == b"\x00\x00"
+    assert body[0x520:0x522] == b"\x55\x66"

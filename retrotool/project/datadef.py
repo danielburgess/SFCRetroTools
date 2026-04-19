@@ -53,6 +53,7 @@ class BuildStep:
     offset: Optional[int] = None      # explicit anchor when DataDef has no pointers/data section
     overflow: dict = field(default_factory=dict)  # strategy/marker/splitter/...
     placement: dict = field(default_factory=dict) # {mode: "overflow"|"relocate"}
+    cache: Optional[bool] = None                  # opt-in/out of per-section caching
     extras: dict = field(default_factory=dict)    # forward-compat raw attrs
 
 
@@ -191,7 +192,7 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
                 f"those live in [pointers]/[data]/[encoding]/[word_wrap]/extras"
             )
         known = {"kind", "file", "en_file", "grow", "codec", "if", "offset",
-                 "overflow", "placement"}
+                 "overflow", "placement", "cache"}
         # `en_file` is the preferred key; `file` is kept as a legacy alias.
         # Resolver auto-defaults when both are absent (→ {en_data_dir}/{name}.txt).
         en_file = sec_doc.get("en_file")
@@ -204,6 +205,23 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
         placement = sec_doc.get("placement")
         if placement is not None and not isinstance(placement, dict):
             raise ValueError(f"datadef {name}: [section.placement] must be a table")
+        cache_raw = sec_doc.get("cache")
+        if cache_raw is None:
+            cache_val: Optional[bool] = None
+        elif isinstance(cache_raw, bool):
+            cache_val = cache_raw
+        elif isinstance(cache_raw, int):
+            cache_val = bool(cache_raw)
+        elif isinstance(cache_raw, str):
+            s = cache_raw.strip().lower()
+            if s in {"true", "1", "yes", "on"}:
+                cache_val = True
+            elif s in {"false", "0", "no", "off"}:
+                cache_val = False
+            else:
+                raise ValueError(f"datadef {name}: [section].cache={cache_raw!r} not bool-like")
+        else:
+            raise ValueError(f"datadef {name}: [section].cache must be bool-like")
         section = BuildStep(
             kind=kind,
             file=en_file or file_alias,
@@ -213,6 +231,7 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
             offset=parse_snes_addr(sec_doc["offset"]) if sec_doc.get("offset") is not None else None,
             overflow=dict(sec_doc.get("overflow") or {}),
             placement=dict(placement or {}),
+            cache=cache_val,
             extras={k: v for k, v in sec_doc.items() if k not in known},
         )
 

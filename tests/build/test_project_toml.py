@@ -332,3 +332,80 @@ def test_freespace_invalid_pair(tmp_path):
     )
     with pytest.raises(SchemaError, match="invalid range"):
         parse_project_toml(tmp_path / "project.toml")
+
+
+def test_mesen_table_parsed(tmp_path):
+    (tmp_path / "project.toml").write_text(textwrap.dedent("""
+        [rom]
+        file = "base.sfc"
+
+        [rom.build]
+        pad = true
+
+        [mesen]
+        sync-sram = true
+        saves-dir = "~/.config/Mesen2/Saves"
+    """), encoding="utf-8")
+    spec = parse_project_toml(tmp_path / "project.toml")
+    assert spec.sync_sram is True
+    assert spec.mesen_saves_dir == "~/.config/Mesen2/Saves"
+    assert spec.archive_sram is True  # default when [mesen] omits the key
+
+
+def test_mesen_archive_disabled():
+    data = {"rom": {"file": "base.sfc", "build": {}},
+            "mesen": {"sync-sram": True, "archive-overwritten": False}}
+    spec = parse_project_toml_dict(data)
+    assert spec.sync_sram is True
+    assert spec.archive_sram is False
+
+
+def test_mesen_table_absent_defaults_off():
+    data = {"rom": {"file": "base.sfc", "build": {"pad": True}}}
+    spec = parse_project_toml_dict(data)
+    assert spec.sync_sram is False
+    assert spec.mesen_saves_dir is None
+
+
+def test_mesen_sync_sram_off_explicit():
+    data = {"rom": {"file": "base.sfc", "build": {}},
+            "mesen": {"sync-sram": False}}
+    spec = parse_project_toml_dict(data)
+    assert spec.sync_sram is False
+
+
+def test_mesen_table_type_validated():
+    data = {"rom": {"file": "base.sfc", "build": {}}, "mesen": "oops"}
+    with pytest.raises(SchemaError, match=r"\[mesen\] must be a table"):
+        parse_project_toml_dict(data)
+
+
+def test_build_syncs_sram_post_write(tmp_path):
+    rom_path = _make_lorom(tmp_path)
+    saves = tmp_path / "Saves"
+    saves.mkdir()
+    (saves / "base.srm").write_bytes(b"save-state")
+
+    data = {"rom": {"file": rom_path.name, "build": {"pad": True}},
+            "mesen": {"sync-sram": True, "saves-dir": str(saves)}}
+    spec = parse_project_toml_dict(data)
+    out = tmp_path / "patched.sfc"
+    build(spec, source_root=tmp_path, out_path=out,
+          original_rom=rom_path)
+    assert (saves / "patched.srm").read_bytes() == b"save-state"
+    # Source untouched.
+    assert (saves / "base.srm").read_bytes() == b"save-state"
+
+
+def test_build_sram_sync_off_by_default(tmp_path):
+    rom_path = _make_lorom(tmp_path)
+    saves = tmp_path / "Saves"
+    saves.mkdir()
+    (saves / "base.srm").write_bytes(b"save-state")
+
+    data = {"rom": {"file": rom_path.name, "build": {"pad": True}}}
+    spec = parse_project_toml_dict(data)
+    out = tmp_path / "patched.sfc"
+    build(spec, source_root=tmp_path, out_path=out,
+          original_rom=rom_path)
+    assert not (saves / "patched.srm").exists()

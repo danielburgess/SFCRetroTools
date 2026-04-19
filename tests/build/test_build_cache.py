@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from retrotool.core.cache import BuildCache
 from retrotool.build import BuildSpec, Section, SectionKind, build
+from retrotool.build.handlers import WriteRange
 from tests.build.conftest import _make_lorom
 
 
@@ -109,3 +112,114 @@ def test_legacy_cache_artifact_rejected_cleanly(tmp_path):
     import pytest as _pt
     with _pt.raises(ValueError, match="magic"):
         _unpack_writes(b"\xAA\xBB\xCC\xDD")
+
+
+# ---- opt-in cache overrides (cache="1" / cache="0") ---------------------
+
+
+def test_cache_override_false_skips_cacheable_kind(tmp_path):
+    """cache=False forces cache-miss on a kind that would otherwise cache."""
+    rom_path = _make_lorom(tmp_path)
+    cache = BuildCache(tmp_path / ".cache")
+    (tmp_path / "p.bin").write_bytes(b"\xAA\xBB\xCC\xDD")
+
+    def _spec_nocache():
+        return BuildSpec(sections=[Section(
+            kind=SectionKind.REP, offset=0x100,
+            files=[Path("p.bin")], cache=False,
+            attrs={"file": "p.bin", "offset": "100"}, source="test",
+        )])
+
+    r1 = build(_spec_nocache(), source_root=tmp_path, out_path=tmp_path / "a.sfc",
+               original_rom=rom_path, cache=cache)
+    r2 = build(_spec_nocache(), source_root=tmp_path, out_path=tmp_path / "b.sfc",
+               original_rom=rom_path, cache=cache)
+    # Second build would hit if cache=False were ignored.
+    assert r1.cache_hits == 0
+    assert r2.cache_hits == 0
+
+
+def test_cache_override_true_enables_asar_and_caches_diff(tmp_path, monkeypatch):
+    """cache=True on an ASAR section enables the opt-in path: diff-mode writes
+    get stored + a second build replays the diff without re-invoking asar."""
+    rom_path = _make_lorom(tmp_path)
+    cache = BuildCache(tmp_path / ".cache")
+    (tmp_path / "p.asm").write_text("org $8000\ndb $AA\n")
+
+    call_count = {"n": 0}
+
+    class _Result:
+        ok = True
+        log = ""
+
+    def _fake_apply(rom_in, patch, rom_out):
+        call_count["n"] += 1
+        out = bytearray(rom_in.read_bytes())
+        out[0x200] = 0xAA
+        out[0x201] = 0xBB
+        rom_out.write_bytes(bytes(out))
+        return _Result()
+
+    monkeypatch.setattr("retrotool.asm.patcher.apply_patch", _fake_apply)
+
+    def _asar_spec():
+        return BuildSpec(sections=[Section(
+            kind=SectionKind.ASAR, files=[Path("p.asm")], cache=True,
+            attrs={"file": "p.asm"}, source="t",
+        )])
+
+    r1 = build(_asar_spec(), source_root=tmp_path, out_path=tmp_path / "a.sfc",
+               original_rom=rom_path, cache=cache)
+    assert r1.cache_hits == 0
+    assert call_count["n"] == 1
+
+    r2 = build(_asar_spec(), source_root=tmp_path, out_path=tmp_path / "b.sfc",
+               original_rom=rom_path, cache=cache)
+    assert r2.cache_hits == 1
+    # asar must NOT have run on the cached build.
+    assert call_count["n"] == 1
+    # Output bytes must match.
+    assert (tmp_path / "a.sfc").read_bytes() == (tmp_path / "b.sfc").read_bytes()
+
+
+def test_asar_cache_invalidates_on_incsrc_change(tmp_path, monkeypatch):
+    """Editing an incsrc'd file bumps the cache key and forces re-asar."""
+    rom_path = _make_lorom(tmp_path)
+    cache = BuildCache(tmp_path / ".cache")
+    (tmp_path / "p.asm").write_text('incsrc "helper.asm"\n')
+    (tmp_path / "helper.asm").write_text("org $8000\ndb $AA\n")
+
+    call_count = {"n": 0}
+
+    class _Result:
+        ok = True
+        log = ""
+
+    def _fake_apply(rom_in, patch, rom_out):
+        call_count["n"] += 1
+        # Simulate the patch reading helper.asm would emit different bytes.
+        helper = (tmp_path / "helper.asm").read_text()
+        out = bytearray(rom_in.read_bytes())
+        out[0x200] = 0xAA if "AA" in helper else 0xEE
+        rom_out.write_bytes(bytes(out))
+        return _Result()
+
+    monkeypatch.setattr("retrotool.asm.patcher.apply_patch", _fake_apply)
+
+    def _asar_spec():
+        return BuildSpec(sections=[Section(
+            kind=SectionKind.ASAR, files=[Path("p.asm")], cache=True,
+            attrs={"file": "p.asm"}, source="t",
+        )])
+
+    build(_asar_spec(), source_root=tmp_path, out_path=tmp_path / "a.sfc",
+          original_rom=rom_path, cache=cache)
+    assert call_count["n"] == 1
+
+    # Mutate the *included* file (not the entry) — must invalidate.
+    (tmp_path / "helper.asm").write_text("org $8000\ndb $EE\n")
+    r = build(_asar_spec(), source_root=tmp_path, out_path=tmp_path / "b.sfc",
+              original_rom=rom_path, cache=cache)
+    assert r.cache_hits == 0
+    assert call_count["n"] == 2
+    assert (tmp_path / "b.sfc").read_bytes()[0x200] == 0xEE

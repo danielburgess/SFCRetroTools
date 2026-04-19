@@ -60,10 +60,28 @@ def _emit_deprecation(kind: SectionKind, source: str, mode: DeprecationMode) -> 
 
 
 _TRUTHY = {"true", "1", "yes", "on"}
+_FALSY = {"false", "0", "no", "off"}
 
 
 def _parse_bool(v: Optional[str]) -> bool:
     return v is not None and v.strip().lower() in _TRUTHY
+
+
+def _parse_tristate_bool(v: Optional[str]) -> Optional[bool]:
+    """Three-state parse: missing → None, truthy → True, falsy → False.
+
+    Used for attrs where the absence of the key must be distinguishable
+    from an explicit false (e.g. per-section cache override)."""
+    if v is None:
+        return None
+    s = v.strip().lower()
+    if not s:
+        return None
+    if s in _TRUTHY:
+        return True
+    if s in _FALSY:
+        return False
+    return None
 
 
 def _parse_offset(v: Optional[str]) -> Optional[int]:
@@ -321,6 +339,7 @@ def _section_from_element(
         dedupe=_parse_bool(attrs.get("dedupe")),
         stride=_parse_int(attrs.get("stride")),
         condition=attrs.get("if"),
+        cache=_parse_tristate_bool(attrs.get("cache")),
         attrs=attrs,
         source=source,
         original_kind=original_kind,

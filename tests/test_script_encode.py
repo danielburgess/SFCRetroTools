@@ -73,13 +73,59 @@ def test_word_wrap_basic():
     assert not trunc
 
 
-def test_word_wrap_truncate_keeps_hex_codes():
-    # Hex codes [HHHH] and {HH} bytecodes survive truncation;
-    # named codes like [end] do not (matches LM3 behavior).
+def test_word_wrap_pad_mode_fills_to_line_width():
+    """pad mode: non-final lines padded to line_width with fill_char,
+    no newline token emitted. Final line left un-padded."""
+    out, trunc, _ = word_wrap_text(
+        "AA BB CC DDD", 5, 3,
+        wrap_mode='pad', fill_char=' ',
+    )
+    assert '[nl]' not in out
+    assert 'DDD' in out
+    assert not trunc
+
+
+def test_word_wrap_pad_mode_custom_fill_char():
+    """First line soft-wraps at exactly line_width (no pad needed);
+    next line is final so also un-padded. Output concatenates directly."""
+    out, _, _ = word_wrap_text(
+        "AA BB CC", 5, 3,
+        wrap_mode='pad', fill_char='.',
+    )
+    assert '[nl]' not in out
+    assert out == "AA BBCC"
+
+
+def test_word_wrap_pad_mode_bracket_tokens_not_counted():
+    """Bracket/brace tokens are zero-col and don't consume pad budget."""
+    out, _, _ = word_wrap_text(
+        "AAA [FF7F] BB CC", 4, 3,
+        wrap_mode='pad', fill_char='_',
+    )
+    assert '[FF7F]' in out
+    assert '_' in out
+    assert '[nl]' not in out
+
+
+def test_word_wrap_pad_mode_rejects_multi_char_fill():
+    with pytest.raises(ValueError, match="single character"):
+        word_wrap_text("AA BB", 5, 3, wrap_mode='pad', fill_char='ab')
+
+
+def test_word_wrap_rejects_bad_mode():
+    with pytest.raises(ValueError, match="'newline' or 'pad'"):
+        word_wrap_text("hi", 5, 3, wrap_mode='bogus')
+
+
+def test_word_wrap_truncate_keeps_bracket_tokens():
+    # All bracket tokens from dropped content survive truncation — hex codes,
+    # FFC0 refs, and named codes like [end]. Dropping [end] leaves an FFC0
+    # redirect target without a terminator, so the text engine reads past
+    # into the next entry's target region.
     out, trunc, _ = word_wrap_text("aaa bbb ccc[FF7F][end]", 3, 1)
     assert trunc
     assert "[FF7F]" in out
-    assert "[end]" not in out
+    assert "[end]" in out
 
 
 def test_entry_in_range():

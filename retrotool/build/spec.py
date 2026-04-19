@@ -78,7 +78,22 @@ class Section:
     grow: Optional[str] = None              # "insert" | "replace" | "fail"
     dedupe: bool = False
     stride: Optional[int] = None            # bytes per record (fixed-records)
+    # Per-field record schema for fixed-records: list of
+    # {label, start, len, fill}. Populated from a DataDef's `[[fields]]`
+    # (or inline attrs). When set, handle_fixed_records treats `file=` as
+    # a text source to pack; when None, `file=` is read as a pre-packed
+    # `stride*count` binary (backwards-compat path).
+    fields: Optional[list[dict]] = None
     condition: Optional[str] = None         # if="${version}==english"
+    # Per-section cache override:
+    #   None  — follow `_CACHEABLE_KINDS` default
+    #   True  — force cache on (opt-in for kinds that are uncached by default,
+    #           e.g. <asar>, where the user has verified the patch writes are
+    #           independent of prior ROM state)
+    #   False — force cache off (opt-out for an otherwise cacheable kind)
+    # ASAR with cache=True uses diff-mode writes (only changed-byte runs are
+    # stored/replayed) and transitively hashes incsrc/incbin dependencies.
+    cache: Optional[bool] = None
     # script-handler extras (LM3 parity)
     pointer_size: Optional[int] = None      # 2 or 3 — pointer width in table
     terminator: Optional[int] = None        # entry terminator byte (default 0x00)
@@ -155,6 +170,23 @@ class BuildSpec:
     # is consumed (picks data_dirs_by_lang[default_lang] when extract is
     # invoked without --lang/--dest). Room for future extract-only config.
     extract_config: dict = field(default_factory=dict)
+    # Mesen2 SRAM-sync post-build hook. When `sync_sram=True`, the build
+    # driver copies `<mesen_saves_dir>/<source_rom_stem>.srm` to
+    # `<mesen_saves_dir>/<out_rom_stem>.srm` after writing the output ROM,
+    # so an in-progress save state on the source ROM transfers to the
+    # patched ROM. No-op when the source SRM doesn't exist.
+    sync_sram: bool = False
+    # Override for the Mesen2 Saves directory. `None` → platform default
+    # (`~/.config/Mesen2/Saves` on Linux). Expansion of `~` is performed by
+    # `retrotool.debugger.mesen_saves.resolve_saves_dir`.
+    mesen_saves_dir: Optional[str] = None
+    # When `sync_sram=True` and a pre-existing destination SRM would be
+    # clobbered, tar.gz the existing file into
+    # `<saves>/<dst_stem>_archive_<timestamp>.tar.gz` first. Only active
+    # when the destination differs from the source (identical content is
+    # redundant to archive). Default True — safe-by-default for iterative
+    # playtest runs that might have accumulated state.
+    archive_sram: bool = True
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)
