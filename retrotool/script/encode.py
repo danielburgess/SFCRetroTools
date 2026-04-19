@@ -26,6 +26,9 @@ from typing import Optional, Union
 from retrotool.script.table import Table
 
 
+_BRACKET_TOKEN_RE = re.compile(r'\[[^\]]*\]|\{[0-9A-Fa-f]{2}\}')
+
+
 @dataclass(frozen=True)
 class ScriptFixup:
     """One unresolved address inside an encoded entry.
@@ -213,8 +216,35 @@ def encode_text(
     return bytes(result), fixups, labels
 
 
-def word_wrap_text(text: str, line_width: int, max_lines: int) -> tuple[str, bool, int]:
-    """Word-wrap with [nl] insertion. Returns (wrapped, was_truncated, num_lines)."""
+def word_wrap_text(
+    text: str, line_width: int, max_lines: int,
+    *, newline: str = '[nl]',
+    wrap_mode: str = 'newline',
+    fill_char: str = ' ',
+) -> tuple[str, bool, int]:
+    """Word-wrap with newline-token insertion. Returns (wrapped, was_truncated, num_lines).
+
+    `newline` is the encoder token emitted at each soft wrap AND recognized in
+    the source text as a manual break. Defaults to `[nl]`; override per-table
+    via `[word_wrap] newline = "[foo]"` for games that use a different token.
+
+    `wrap_mode`:
+      * `"newline"` (default) — emit `newline` token at each soft wrap.
+      * `"pad"` — pad each non-final line to exactly `line_width` columns with
+        `fill_char` and emit NO newline tokens. Intended for text engines that
+        auto-wrap at a fixed column (e.g. unit-info style panels) and render
+        newline tokens as visible artifacts. Requires a single-char `fill_char`.
+
+    Truncation past `max_lines` always drops (with trailing-hex preservation).
+    The `was_truncated` return lets the caller force an overflow route so the
+    redirect still fires even when truncated bytes happen to fit the slot.
+    """
+    if wrap_mode not in ('newline', 'pad'):
+        raise ValueError(f"word_wrap wrap_mode must be 'newline' or 'pad', got {wrap_mode!r}")
+    if wrap_mode == 'pad' and len(fill_char) != 1:
+        raise ValueError(
+            f"word_wrap fill_char must be a single character in pad mode, got {fill_char!r}"
+        )
     normalized = text.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
     normalized = re.sub(r' {2,}', ' ', normalized).strip()
 
@@ -233,7 +263,7 @@ def word_wrap_text(text: str, line_width: int, max_lines: int) -> tuple[str, boo
         col = 0
 
     for token in tokens:
-        if token == '[nl]':
+        if token == newline:
             _flush(True)
             continue
         if (token.startswith('[') and token.endswith(']')) or \
@@ -275,20 +305,38 @@ def word_wrap_text(text: str, line_width: int, max_lines: int) -> tuple[str, boo
     truncated = len(lines) > max_lines
     if truncated:
         dropped_text = ''.join(lines[max_lines:])
-        trailing_hex = re.findall(
-            r'\[FFC0@\d+(?::\w+)?\]|\[[0-9A-Fa-f]{2,}\]|\{[0-9A-Fa-f]{2}\}',
+        # Preserve any bracket tokens from dropped content so control codes
+        # (terminators, FFC0 redirects, raw hex, named codes like [end]) still
+        # reach the encoded output. Without this, a truncated entry written to
+        # an FFC0 target has no terminator and the text engine keeps reading
+        # into neighboring target regions.
+        trailing_tokens = re.findall(
+            r'\[[^\]]*\]|\{[0-9A-Fa-f]{2}\}',
             dropped_text,
         )
         lines = lines[:max_lines]
         line_nl = line_nl[:max_lines]
-        if trailing_hex:
-            lines[-1] += ''.join(trailing_hex)
+        if trailing_tokens:
+            lines[-1] += ''.join(trailing_tokens)
 
     parts: list[str] = []
-    for i, line in enumerate(lines):
-        parts.append(line)
-        if i < len(lines) - 1 and line_nl[i]:
-            parts.append('[nl]')
+    if wrap_mode == 'pad':
+        # Pad every non-final line out to line_width with fill_char; emit no
+        # newline tokens. Bracket/brace tokens are zero-col (consistent with
+        # the measurement used during wrapping), so we measure the visible
+        # column count the same way when computing how much to pad.
+        for i, line in enumerate(lines):
+            parts.append(line)
+            if i < len(lines) - 1:
+                visible = len(_BRACKET_TOKEN_RE.sub('', line))
+                padding = line_width - visible
+                if padding > 0:
+                    parts.append(fill_char * padding)
+    else:
+        for i, line in enumerate(lines):
+            parts.append(line)
+            if i < len(lines) - 1 and line_nl[i]:
+                parts.append(newline)
     return ''.join(parts), truncated, len(lines)
 
 
@@ -325,11 +373,15 @@ def encode_script_file(
     word_wrap: Optional[dict] = None,
     sub_table_filter: Optional[int] = None,
     textbuf_limit: Optional[int] = None,
-) -> list[tuple[bytes, Optional[int], list[ScriptFixup], dict[str, int]]]:
+) -> list[tuple[bytes, Optional[int], list[ScriptFixup], dict[str, int], bool]]:
     """Parse <<index>>-delimited script and encode each entry.
 
-    Returns list of (encoded_bytes, original_address, fixups, labels).
-    Entries are emitted in header-index order; gaps fill with `b'\\x00'`.
+    Returns list of (encoded_bytes, original_address, fixups, labels, force_overflow).
+    `force_overflow` is True when the entry's source was truncated by word_wrap
+    — the handler should route through the overflow strategy even if the
+    (truncated) encoded bytes happen to fit the inline slot, so the redirect
+    still fires in parity with other oversized entries. Entries are emitted in
+    header-index order; gaps fill with `b'\\x00'`.
     """
     tbl = Table(str(table_filename))
     fb_tbl = Table(str(fallback_table)) if fallback_table else None
@@ -364,29 +416,34 @@ def encode_script_file(
         parsed[header_idx] = (content, orig_addr)
         file_order.append(header_idx)
 
-    encoded_entries: list[tuple[bytes, Optional[int], list, dict]] = []
+    encoded_entries: list[tuple[bytes, Optional[int], list, dict, bool]] = []
     if not parsed:
         return encoded_entries
 
     max_idx = max(parsed)
     for entry_idx in range(max_idx + 1):
         if entry_idx not in parsed:
-            encoded_entries.append((b'\x00', None, [], {}))
+            encoded_entries.append((b'\x00', None, [], {}, False))
             continue
         content, orig_addr = parsed[entry_idx]
         if not content or content == '[end]':
-            encoded_entries.append((b'\x00', orig_addr, [], {}))
+            encoded_entries.append((b'\x00', orig_addr, [], {}, False))
             continue
         if '<<<window' in content:
             # Windowed entries handled by separate path; keep slot.
-            encoded_entries.append((b'\x00', orig_addr, [], {}))
+            encoded_entries.append((b'\x00', orig_addr, [], {}, False))
             continue
+        force_overflow = False
         if word_wrap is not None and entry_in_range(entry_idx, word_wrap.get('entries')):
-            content, _, _ = word_wrap_text(
+            content, was_truncated, _ = word_wrap_text(
                 content, word_wrap['line_width'], word_wrap['max_lines'],
+                newline=word_wrap.get('newline', '[nl]'),
+                wrap_mode=word_wrap.get('wrap_mode', 'newline'),
+                fill_char=word_wrap.get('fill_char', ' '),
             )
+            force_overflow = was_truncated
         encoded, fixups, labels = encode_text(content, tbl, fallback_table=fb_tbl)
-        encoded_entries.append((encoded, orig_addr, fixups, labels))
+        encoded_entries.append((encoded, orig_addr, fixups, labels, force_overflow))
 
     if textbuf_limit is not None:
         # Walk FFC0 chains and warn — caller may upgrade to error.
@@ -394,7 +451,7 @@ def encode_script_file(
             if idx in visited or idx >= len(encoded_entries):
                 return 0
             visited.add(idx)
-            data, _, e_fixups, _ = encoded_entries[idx]
+            data, _, e_fixups, _, _ = encoded_entries[idx]
             total = len(data)
             for fixup in e_fixups:
                 if fixup.entry_idx is not None:

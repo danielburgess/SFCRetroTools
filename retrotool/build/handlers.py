@@ -216,12 +216,48 @@ def handle_project(rom: bytearray, section: Section, root: Path, ctx: Optional[B
     return WriteRange(offset=0, length=0)
 
 
-def handle_asar(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
+def _diff_ranges(before: bytes, after: bytes) -> list[WriteRange]:
+    """Contiguous runs of changed bytes between `before` and `after`.
+
+    Bytes present only in `after` (tail extension) count as changed.
+    Shrinkage isn't representable as a WriteRange set — caller validates.
+    """
+    if len(after) < len(before):
+        raise ValueError("after must be at least as long as before")
+    ranges: list[WriteRange] = []
+    n = len(before)
+    m = len(after)
+    i = 0
+    while i < m:
+        if i < n and before[i] == after[i]:
+            i += 1
+            continue
+        start = i
+        while i < m and (i >= n or before[i] != after[i]):
+            i += 1
+        ranges.append(WriteRange(offset=start, length=i - start))
+    return ranges
+
+
+def handle_asar(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None):
     """Apply an asar patch to the working ROM. Round-trips through a temp file
     because the `asar` CLI operates on disk. Section.attrs format:
       file=patch.asm  (required)
       includes=A|B|C  (optional, |-separated additional include dirs)
       defines=K=V|K=V (optional, |-separated define list)
+
+    Return type varies with caching mode:
+      * default (no `cache="1"`) — returns a single WriteRange covering the
+        full ROM, matching historical behavior: cache replay (if this kind
+        were force-enabled) would overlay the entire ROM including any
+        prior-section writes that happened to be baked in at capture time.
+        That coupling is why asar isn't in _CACHEABLE_KINDS by default.
+      * `cache="1"` — diff-mode. Returns `list[WriteRange]` covering only
+        the bytes asar actually changed, so cache replay applies an
+        overlay independent of prior-section output. This only stays
+        correct if the patch's writes don't *read* ROM bytes whose value
+        depends on earlier sections; the opt-in shifts that responsibility
+        to the user.
     """
     if not section.files:
         raise HandlerError(f"{section.source}: <asar> requires file=… (.asm)")
@@ -246,11 +282,12 @@ def handle_asar(rom: bytearray, section: Section, root: Path, ctx: Optional[Buil
         k, v = kv.split("=", 1)
         defines[k.strip()] = v.strip()
 
+    before = bytes(rom)
     with tempfile.TemporaryDirectory(prefix="retrotool-asar-") as td:
         tdp = Path(td)
         rom_in = tdp / "in.sfc"
         rom_out = tdp / "out.sfc"
-        rom_in.write_bytes(bytes(rom))
+        rom_in.write_bytes(before)
         result = apply_patch(rom_in, AsarPatch(asm_file, includes, defines), rom_out)
         if not result.ok:
             raise HandlerError(f"{section.source}: asar failed:\n{result.log}")
@@ -266,6 +303,15 @@ def handle_asar(rom: bytearray, section: Section, root: Path, ctx: Optional[Buil
             f"(set allow-shrink=\"1\" to permit)"
         )
     rom[:] = new_rom
+
+    if section.cache:
+        # Diff-mode: record only changed-byte runs so the cached artifact
+        # is independent of prior-section writes. Shrinkage (allow-shrink)
+        # can't be represented as a write-set — fall back to whole-ROM and
+        # let the caller know by returning a single WriteRange.
+        if len(new_rom) < len(before):
+            return WriteRange(offset=0, length=len(new_rom))
+        return _diff_ranges(before, new_rom)
     return WriteRange(offset=0, length=len(new_rom))
 
 
@@ -428,7 +474,7 @@ def handle_script(
     )
     count = int(section.count)
     while len(entries) < count:
-        entries.append((b"\x00", None, [], {}))
+        entries.append((b"\x00", None, [], {}, False))
     entries = entries[:count]
 
     ptr_tbl_pc = section.pointer_table
@@ -557,7 +603,7 @@ def handle_script(
     # from `cur`. With an overflow strategy configured, oversize entries
     # are routed through the strategy (inline stub + tail in freespace).
     cur = data_start
-    for i, (enc, orig_addr, ent_fixups, ent_labels) in enumerate(entries):
+    for i, (enc, orig_addr, ent_fixups, ent_labels, force_overflow) in enumerate(entries):
         if i in sentinel_raw:
             ptrs.append(None)
             continue
@@ -597,7 +643,7 @@ def handle_script(
         first_tail_pc: Optional[int] = None
         pack_fixups: list[object] = []
 
-        if overflow_strategy is not None and max_inline < len(enc):
+        if overflow_strategy is not None and (max_inline < len(enc) or force_overflow):
             # Oversize — delegate to strategy.
             packed = overflow_strategy.pack(
                 _OverflowEntry(
@@ -721,32 +767,201 @@ HandlerFn = Callable[
     "WriteRange | list[WriteRange]",
 ]
 
+_FIXED_HEADER_RE = None  # lazy-compiled (see _pack_fixed_records)
+
+
+def _looks_like_fixed_script(data: bytes) -> bool:
+    """Heuristic: text source if UTF-16 LE BOM or ASCII/UTF-8 starting with
+    `#` comment, blank lines, or the `<<$HEX:idx.label>>` header marker."""
+    if data.startswith(b"\xff\xfe"):
+        return True
+    head = data[:4096]
+    # Strip leading whitespace; require at least one `<<$` header somewhere
+    # in the first 4k — raw packed binaries virtually never contain that
+    # exact byte sequence.
+    return b"<<$" in head
+
+
+def _pack_fixed_records(
+    text: str,
+    base: bytes,
+    *,
+    stride: int,
+    count: int,
+    fields: list[dict],
+    table,
+    fallback_table,
+    source: str,
+) -> bytes:
+    """Pack a `<<$HEX:idx.label>>`-delimited script into `stride * count`
+    bytes. Non-field bytes inside each record are preserved from `base`
+    (caller passes the existing ROM slice at data_offset..+stride*count).
+
+    Field schema: each dict must have keys `label`, `start`, `len`; `fill`
+    defaults to 0x20 (space). Entries with idx ≥ count, or label not in the
+    schema, raise HandlerError."""
+    import re as _re
+
+    global _FIXED_HEADER_RE
+    if _FIXED_HEADER_RE is None:
+        _FIXED_HEADER_RE = _re.compile(r"\$[0-9A-Fa-f]+:(\d+)\.(\w+)")
+
+    # Build label→field lookup; validate field schema once.
+    field_by_label: dict[str, dict] = {}
+    for f in fields:
+        if "label" not in f or "start" not in f or "len" not in f:
+            raise HandlerError(
+                f"{source}: fixed-records field schema missing label/start/len: {f!r}"
+            )
+        field_by_label[str(f["label"])] = {
+            "start": int(f["start"]),
+            "len": int(f["len"]),
+            "fill": int(f.get("fill", 0x20)),
+        }
+
+    buf = bytearray(base)
+    if len(buf) != stride * count:
+        # Caller gave a short base (e.g. ROM smaller than table region).
+        # Extend with the first-field fill or 0xFF as a safe default.
+        buf.extend(b"\xff" * (stride * count - len(buf)))
+
+    from retrotool.script.encode import encode_text as _encode_text
+    from retrotool.script.table import Table as _Table
+
+    tbl = table if hasattr(table, "char_map") else _Table(str(table))
+    fb_tbl = None
+    if fallback_table is not None:
+        fb_tbl = fallback_table if hasattr(fallback_table, "char_map") else _Table(str(fallback_table))
+
+    # Parse `<<...>>` blocks. Split on `<<` and take everything up to `>>`
+    # as the header, rest as content until the next `<<`.
+    for entry in text.split("<<")[1:]:
+        if ">>" not in entry:
+            continue
+        header, _, content = entry.partition(">>")
+        if content.startswith("\n"):
+            content = content[1:]
+        content = content.rstrip("\n\r\t ")
+        m = _FIXED_HEADER_RE.match(header)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        label = m.group(2)
+        if idx >= count:
+            raise HandlerError(
+                f"{source}: entry {idx} exceeds count={count}"
+            )
+        field = field_by_label.get(label)
+        if field is None:
+            raise HandlerError(
+                f"{source}: entry {idx} references unknown field label {label!r} "
+                f"(known: {sorted(field_by_label)!r})"
+            )
+        encoded, _fixups, _labels = _encode_text(content, tbl, fallback_table=fb_tbl)
+        field_len = field["len"]
+        if len(encoded) > field_len:
+            encoded = encoded[:field_len]
+        padded = encoded + bytes([field["fill"]]) * (field_len - len(encoded))
+        rec_off = idx * stride + field["start"]
+        buf[rec_off:rec_off + field_len] = padded
+
+    return bytes(buf)
+
+
 def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
-    """Fixed-stride record table. Source = packed binary `file=`. Validates
-    `len(file) == stride * count` (when both given). The structured-fields
-    encoder (TOML records → packed bytes per `fields=` schema) is a follow-on."""
+    """Fixed-stride record table.
+
+    Two source modes, auto-detected:
+
+    1. **Text script** (`.txt` containing `<<$HEX:idx.label>>` headers) —
+       encoded record-by-record into `stride * count` bytes using the
+       DataDef's `[[fields]]` schema + `[encoding].table_file`. Non-field
+       bytes inside each record are preserved from the working ROM so
+       stride padding / unmapped fields stay intact.
+
+    2. **Pre-packed binary** (`stride * count` bytes) — written as-is.
+       Backwards-compat for asset-pipeline flows that pack records with
+       their own tooling.
+    """
     if section.offset is None:
         raise HandlerError(f"{section.source}: <fixed-records> requires offset")
     if not section.files:
         raise HandlerError(f"{section.source}: <fixed-records> requires file=…")
-    data = _read_concat(section, root)
+    raw = _read_concat(section, root)
     stride = section.stride
     count = section.count
+    grow = (section.grow or "replace").lower()
+    allow_grow = (grow == "insert")
+
+    # Text-pack path: need a field schema + stride + count. Missing any of
+    # these with a text-looking source is an error — users expect retrotool
+    # to pack, not misread as binary.
+    is_text = _looks_like_fixed_script(raw)
+    if is_text:
+        if not section.fields:
+            raise HandlerError(
+                f"{section.source}: fixed-records source {section.files[0]} looks "
+                f"like a text script but section has no field schema "
+                f"(define [[fields]] in the DataDef)"
+            )
+        if stride is None or count is None:
+            raise HandlerError(
+                f"{section.source}: text-mode fixed-records requires "
+                f"stride+count (from DataDef's block_len + entries/pointers)"
+            )
+        # Grow the working buffer so we can read a base slice even for
+        # fresh (zero-length) regions.
+        total = stride * count
+        end = section.offset + total
+        if end > len(rom):
+            if not allow_grow:
+                raise HandlerError(
+                    f"{section.source}: table region {section.offset:#x}..{end:#x} "
+                    f"exceeds ROM size {len(rom):#x} (use grow='insert')"
+                )
+            rom.extend(b"\x00" * (end - len(rom)))
+        base_slice = bytes(rom[section.offset:end])
+        # Decode text respecting UTF-16 LE BOM (lm3-parity).
+        if raw.startswith(b"\xff\xfe"):
+            text = raw.decode("utf-16")
+        else:
+            text = raw.decode("utf-8")
+        if section.table is None:
+            raise HandlerError(
+                f"{section.source}: text-mode fixed-records requires an "
+                f"[encoding].table_file on the DataDef"
+            )
+        tbl_path = _resolve(Path(str(section.table)), root)
+        fb_path = (
+            _resolve(Path(str(section.fallback_table)), root)
+            if section.fallback_table else None
+        )
+        data = _pack_fixed_records(
+            text, base_slice,
+            stride=stride, count=count,
+            fields=section.fields,
+            table=tbl_path,
+            fallback_table=fb_path,
+            source=section.source or "",
+        )
+        return _write(rom, section.offset, data,
+                      allow_grow=allow_grow, source=section.source or "")
+
+    # Pre-packed binary path.
     if stride is not None and count is not None:
         expected = stride * count
-        if len(data) != expected:
+        if len(raw) != expected:
             raise HandlerError(
-                f"{section.source}: <fixed-records> file is {len(data)}b, "
+                f"{section.source}: <fixed-records> file is {len(raw)}b, "
                 f"expected stride*count = {stride}*{count} = {expected}b"
             )
-    elif stride is not None and len(data) % stride != 0:
+    elif stride is not None and len(raw) % stride != 0:
         raise HandlerError(
-            f"{section.source}: <fixed-records> file size {len(data)}b not a "
+            f"{section.source}: <fixed-records> file size {len(raw)}b not a "
             f"multiple of stride={stride}"
         )
-    grow = (section.grow or "replace").lower()
-    return _write(rom, section.offset, data,
-                  allow_grow=(grow == "insert"), source=section.source or "")
+    return _write(rom, section.offset, raw,
+                  allow_grow=allow_grow, source=section.source or "")
 
 
 def _handle_script_windowed(
@@ -967,7 +1182,7 @@ def _emit_auto_window_writes(
         sub_table_filter=section.pointer_table,
     )
     while len(entries) < count:
-        entries.append((b"\x00", None, [], {}))
+        entries.append((b"\x00", None, [], {}, False))
     entries = entries[:count]
 
     # Per-entry slot end = nearest strictly-greater original PC across all
@@ -1016,7 +1231,7 @@ def _emit_auto_window_writes(
     _dbg = _rtd and (_rtd == section.source or _rtd in str(section.source))
     if os.environ.get('RT_DEBUG_AUTO_WIN_ALL'):
         print(f"[auto_win] section.source={section.source!r}")
-    for i, (enc, _orig_addr, ent_fixups, ent_labels) in enumerate(entries):
+    for i, (enc, _orig_addr, ent_fixups, ent_labels, force_overflow) in enumerate(entries):
         slot_pc = orig_pcs[i]
         if slot_pc is None:
             if _dbg:
@@ -1052,7 +1267,7 @@ def _emit_auto_window_writes(
             if _dbg: print(f"    → no-op (enc matches source)")
             entry_pc[i] = slot_pc
             entry_text_pc[i] = slot_pc
-        elif len(enc) <= slot_size:
+        elif len(enc) <= slot_size and not force_overflow:
             _ensure_room(rom, slot_pc + len(enc))
             rom[slot_pc:slot_pc + len(enc)] = enc
             writes.append(WriteRange(offset=slot_pc, length=len(enc)))

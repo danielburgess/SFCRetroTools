@@ -24,17 +24,37 @@ from retrotool.build.interpolate import evaluate_condition
 from retrotool.build.spec import BuildSpec, Section, SectionKind
 
 
-# Section kinds with single-range writes (offset+length deterministic from
-# attrs+inputs). <asar> and <project> can write anywhere in the ROM, so we
-# don't cache them — the key wouldn't capture the output region reliably.
+# Section kinds with writes deterministic from attrs+inputs. <asar> and
+# <project> are NOT in this set by default: their output can in principle
+# depend on assembler state we don't track (reads of prior ROM bytes,
+# macro-computed freespace, etc.). A user who has verified their patch is
+# a pure write-set can opt one in per-section with `cache="1"`, which
+# also activates diff-mode writes in handle_asar + transitive incsrc /
+# incbin hashing in _section_cache_key. Conversely, `cache="0"` forces
+# caching off for an otherwise cacheable kind.
 _CACHEABLE_KINDS = frozenset({
     SectionKind.REP, SectionKind.INS, SectionKind.BIN,
     SectionKind.GRAPHICS, SectionKind.SCRIPT,
+    SectionKind.FIXED_RECORDS, SectionKind.WINDOWED_SCRIPT,
+})
+
+# Kinds eligible for explicit opt-in (cache="1"). These need extra work to
+# cache safely — see handle_asar's diff-mode path for the asar story.
+_OPT_IN_CACHEABLE_KINDS = frozenset({
+    SectionKind.ASAR,
 })
 
 # Bumped when the cache-key schema changes; old entries are ignored on read.
 # v3: cache artifact reframed to support multi-range writes per section.
-_CACHE_VERSION = "3"
+# v4: key now hashes all typed Section fields that affect handler output
+#     (offset, stride, count, fields, fallback_table, pointer_table,
+#     pointer_size, terminator, word_wrap, overflow, placement, textbuf_limit,
+#     codec). Pre-v4 keys are silently invalidated.
+# v5: ASAR sections opted in via cache="1" hash the transitive incsrc /
+#     incbin dependency tree, plus `defines` / `includes` / `allow-shrink`
+#     attrs. cache override flag itself is part of the key so flipping it
+#     invalidates.
+_CACHE_VERSION = "5"
 
 # Multi-write cache artifact framing:
 #   magic  = b"RTMW"        (4 bytes)
@@ -73,22 +93,57 @@ def _unpack_writes(blob: bytes) -> list[tuple[int, bytes]]:
     return out
 
 
-def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
-    """SHA-256 over section kind + attrs + input-file content hashes.
+def _is_cacheable(section: Section) -> bool:
+    """Resolve per-section cache override against the default kind set.
 
-    Returns None if the section is in a non-cacheable kind or any input file
-    is missing (handler will raise its own error)."""
-    if section.kind not in _CACHEABLE_KINDS:
+    - `cache=True`  always caches (must be in _CACHEABLE_KINDS OR
+      _OPT_IN_CACHEABLE_KINDS; other kinds aren't wired yet).
+    - `cache=False` always skips cache.
+    - `cache=None`  follows _CACHEABLE_KINDS.
+    """
+    if section.cache is False:
+        return False
+    if section.cache is True:
+        return section.kind in _CACHEABLE_KINDS or section.kind in _OPT_IN_CACHEABLE_KINDS
+    return section.kind in _CACHEABLE_KINDS
+
+
+def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
+    """SHA-256 over section kind + typed fields + attrs + input-file content hashes.
+
+    All typed Section fields that influence handler output must be hashed
+    here. DataDef-derived sections have an empty `attrs` dict — their
+    configuration lives entirely in typed fields (stride, count, fields,
+    pointer_table, word_wrap, overflow, ...), so hashing `attrs` alone
+    would collide whenever two datadefs point at the same input file.
+
+    For ASAR sections opted in via `cache="1"`, the transitive incsrc /
+    incbin dependency tree is walked and hashed. See
+    `retrotool.build.asar_deps.scan_deps` for limits.
+
+    Returns None if the section is not cacheable (kind default + override)
+    or any input file is missing (handler will raise its own error)."""
+    if not _is_cacheable(section):
         return None
     parts: list[bytes] = [f"v{_CACHE_VERSION}".encode(), section.kind.value.encode()]
+    # Hash the override flag so toggling cache on/off produces distinct keys.
+    parts.append(f"__cache_override__={section.cache!r}".encode())
     # Stable attr ordering — we hash dict items, not the dict.
     for k in sorted(section.attrs):
         parts.append(f"{k}={section.attrs[k]}".encode())
-    # `size` and `grow` are first-class Section fields, often absent from
-    # `attrs` after TOML coercion. Hash them explicitly so two sections that
-    # differ only in those fields don't collide.
-    parts.append(f"__size__={section.size}".encode())
-    parts.append(f"__grow__={section.grow}".encode())
+    # Typed Section fields. Stored under `__name__` to avoid colliding with
+    # any same-named attr from the front-end. `repr()` gives a stable form
+    # for primitives, dicts (py≥3.7 insertion-ordered), and lists.
+    typed_fields = (
+        "offset", "size", "grow", "codec",
+        "count", "stride", "fields",
+        "pointer_table", "pointer_size", "terminator",
+        "word_wrap", "overflow", "placement",
+        "textbuf_limit", "pad_to", "bpp", "dedupe",
+        "condition", "from_datadef",
+    )
+    for name in typed_fields:
+        parts.append(f"__{name}__={repr(getattr(section, name, None))}".encode())
     for f in section.files:
         path = (files_root / Path(str(f))).resolve()
         if not path.exists():
@@ -98,6 +153,33 @@ def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
         tpath = (files_root / Path(str(section.table))).resolve()
         if tpath.exists():
             parts.append(sha256_file(tpath).encode())
+    if section.fallback_table is not None:
+        fpath = (files_root / Path(str(section.fallback_table))).resolve()
+        if fpath.exists():
+            parts.append(sha256_file(fpath).encode())
+    # ASAR opt-in: walk incsrc/incbin transitive deps and hash every file.
+    # The entry file is already hashed via `section.files` above, but deps
+    # aren't — this adds them. Also includes/defines are part of the key.
+    if section.kind == SectionKind.ASAR and section.cache:
+        from retrotool.build.asar_deps import scan_deps
+        raw = section.attrs
+        include_dirs: list[Path] = []
+        for p in (raw.get("includes") or "").split("|"):
+            if p:
+                include_dirs.append((files_root / Path(p)).resolve())
+        for fspec in section.files:
+            entry = (files_root / Path(str(fspec))).resolve()
+            if not entry.exists():
+                continue
+            for dep in scan_deps(entry, include_dirs=include_dirs):
+                # `entry` itself is re-hashed here — cheap and keeps scan_deps
+                # self-contained (the caller doesn't need to skip deps[0]).
+                parts.append(f"asar_dep={dep}".encode())
+                parts.append(sha256_file(dep).encode())
+        # Pin the other asar-handler-visible attrs explicitly so trailing
+        # attr additions don't accidentally collide or invalidate.
+        for k in ("includes", "defines", "allow-shrink"):
+            parts.append(f"asar_attr_{k}={raw.get(k, '')}".encode())
     return sha256_many(parts)
 
 
@@ -169,10 +251,15 @@ def _section_kinds_filter(
 ) -> Optional[Callable[[Section], bool]]:
     """Return a predicate(section) → True if the section should run.
 
-    Filter strings match either `section.kind.value` (e.g. "asar", "script")
-    or an individual section's identifier (`section.from_datadef` or the
-    `datadef:<name>` form of `section.source`). Lets callers cherry-pick
-    specific tables — e.g. `--only scene-desc-name` — without editing config.
+    Matchable identifiers per section:
+      * `section.kind.value` — e.g. "asar", "script"
+      * `section.from_datadef` — DataDef name (for DataDef-derived sections)
+      * `section.attrs["name"]` / `section.attrs["alias"]` — user-set on
+        inline `[[rom.build.sections]]` entries that lack a DataDef
+      * `section.source` and its ":"-suffix — e.g. "project.toml:sections[5]"
+        and "sections[5]"
+      * Positional aliases for inline sections: `sections[N]` also matches
+        the singular `section[N]`, so either spelling works on the CLI.
     """
     if not only and not skip:
         return None
@@ -183,13 +270,22 @@ def _section_kinds_filter(
         ids: set[str] = {section.kind.value.lower()}
         if section.from_datadef:
             ids.add(section.from_datadef.lower())
+        # User-set alias / name on inline sections.
+        for key in ("name", "alias"):
+            v = section.attrs.get(key)
+            if isinstance(v, str) and v:
+                ids.add(v.lower())
         if section.source:
-            # section.source is typically "datadef:<name>" or "file:line" —
-            # match either the raw string or the ":"-suffix (e.g. datadef name).
+            # section.source is typically "datadef:<name>" or
+            # "<path>:sections[N]". Match the raw string, the ":"-suffix,
+            # and — for positional inline refs — the singular form.
             src = section.source.lower()
             ids.add(src)
             if ":" in src:
-                ids.add(src.split(":", 1)[1])
+                suffix = src.split(":", 1)[1]
+                ids.add(suffix)
+                if suffix.startswith("sections[") and suffix.endswith("]"):
+                    ids.add("section[" + suffix[len("sections["):])
         return ids
 
     def keep(section: Section) -> bool:
@@ -381,6 +477,17 @@ def build(
         out_path.write_bytes(smc + bytes(rom))
     else:
         out_path.write_bytes(bytes(rom))
+
+    # Mesen2 SRAM sync (post-ROM-write). Copies the source ROM's .srm
+    # to the output ROM's .srm so an in-progress save state transfers
+    # across builds. Refuses to clobber the source .srm (would happen if
+    # source and output share a stem). Silent no-op when source .srm
+    # doesn't exist.
+    if spec.sync_sram and original_rom is not None:
+        from retrotool.debugger.mesen_saves import resolve_saves_dir, sync_sram
+        saves = resolve_saves_dir(spec.mesen_saves_dir)
+        sync_sram(original_rom, out_path, saves_dir=saves,
+                  archive=spec.archive_sram)
 
     # Diff output (post-ROM-write). `spec.diff` may be "ips", "xdelta", or
     # "both" (comma-separated values accepted as well).

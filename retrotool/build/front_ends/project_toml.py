@@ -90,6 +90,31 @@ def _coerce_int(v: Any, field: str) -> Optional[int]:
     raise SchemaError(f"{field}: expected int, got {type(v).__name__}")
 
 
+_TRUTHY_STR = {"true", "1", "yes", "on"}
+_FALSY_STR = {"false", "0", "no", "off"}
+
+
+def _coerce_tristate_bool(v: Any, field: str) -> Optional[bool]:
+    """None/missing → None; bool → bool; truthy/falsy str or int → bool.
+    Used for attrs where absence must be distinguishable from explicit false."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if not s:
+            return None
+        if s in _TRUTHY_STR:
+            return True
+        if s in _FALSY_STR:
+            return False
+        raise SchemaError(f"{field}: expected bool-like, got {v!r}")
+    raise SchemaError(f"{field}: expected bool-like, got {type(v).__name__}")
+
+
 def _coerce_path(v: Any, field: str) -> PurePosixPath:
     if not isinstance(v, str):
         raise SchemaError(f"{field}: expected string path, got {type(v).__name__}")
@@ -277,6 +302,28 @@ def parse_project_toml_dict(
             raise SchemaError("[extract] must be a table")
         spec.extract_config = dict(ex)
 
+    # `[mesen]` table — Mesen2-emulator integration. Currently supports
+    # `sync-sram = true` (default false) + optional `saves-dir = "..."`
+    # override. When enabled, the build driver copies the source ROM's
+    # .srm to the output ROM's .srm after writing the output (see
+    # `retrotool.debugger.mesen_saves.sync_sram`).
+    mesen = data.get("mesen")
+    if mesen is not None:
+        if not isinstance(mesen, dict):
+            raise SchemaError("[mesen] must be a table")
+        sync_val = mesen.get("sync-sram", mesen.get("sync_sram"))
+        spec.sync_sram = bool(_coerce_tristate_bool(sync_val, "[mesen].sync-sram"))
+        sdir = mesen.get("saves-dir", mesen.get("saves_dir"))
+        if sdir is not None:
+            if not isinstance(sdir, str):
+                raise SchemaError("[mesen].saves-dir must be a string")
+            spec.mesen_saves_dir = sdir
+        arch_val = mesen.get("archive-overwritten",
+                             mesen.get("archive_overwritten"))
+        arch_b = _coerce_tristate_bool(arch_val, "[mesen].archive-overwritten")
+        if arch_b is not None:
+            spec.archive_sram = arch_b
+
     raw_order = mb.get("order")
     if raw_order is not None:
         if not isinstance(raw_order, list) or not all(isinstance(x, str) for x in raw_order):
@@ -367,6 +414,16 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
             ww["max_lines"] = _coerce_int(word_wrap["max-lines"], f"{field_prefix}.word-wrap.max-lines")
         if "entries" in word_wrap:
             ww["entries"] = word_wrap["entries"]
+        if "newline" in word_wrap:
+            ww["newline"] = str(word_wrap["newline"])
+        for wm_key in ("wrap-mode", "wrap_mode"):
+            if wm_key in word_wrap:
+                ww["wrap_mode"] = str(word_wrap[wm_key])
+                break
+        for fc_key in ("fill-char", "fill_char"):
+            if fc_key in word_wrap:
+                ww["fill_char"] = str(word_wrap[fc_key])
+                break
         word_wrap = ww
     overflow = entry.get("overflow")
     if overflow is not None and not isinstance(overflow, dict):
@@ -397,6 +454,7 @@ def _section_from_dict(entry: dict, *, index: int, source: str) -> Section:
         textbuf_limit=_coerce_int(entry.get("textbuf-limit"), f"{field_prefix}.textbuf-limit"),
         overflow=overflow,
         placement=placement,
+        cache=_coerce_tristate_bool(entry.get("cache"), f"{field_prefix}.cache"),
         attrs={k: str(v) for k, v in entry.items()},
         source=f"{source}:sections[{index}]",
         original_kind=None,
