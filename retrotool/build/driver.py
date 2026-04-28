@@ -1,15 +1,27 @@
 """Build pipeline: BuildSpec → output ROM file.
 
-Steps:
-  1. Copy original ROM into a working bytearray (SMC header stripped, kept aside).
-  2. Iterate sections in declaration order; dispatch each to its handler.
-  3. Post-process: revbyteloc patch, pad to next SNES size, fix checksum.
-  4. Reattach SMC header (if original had one), write to `out_path`.
+Two-phase execution:
+  1. **Gather (concurrent).** Parallel-eligible sections (handlers that don't
+     read working-rom state, don't touch `ctx.allocator`, don't write
+     `ctx.labels`) are dispatched to a `ThreadPoolExecutor`. Each worker runs
+     the handler against a private bytearray scratch (a copy of the original
+     ROM) and packages a `(WriteRange, bytes)` write-set. Output bytes are
+     buffered, never applied directly.
+  2. **Apply (serial, in declared order).** The main loop walks
+     `spec.sections`. Cache-hit / parallel / serial sections are applied or
+     run in declared order against the shared `rom` bytearray. Order is
+     preserved so `export-label` exports, freespace allocation, and `<asar>`
+     patches see prior writes exactly as the legacy serial flow did.
 
-Diff output (xdelta/IPS) lands in Phase 4.
+Post-process — revbyteloc patch, pad to next SNES size, fix checksum,
+optional diff (xdelta/IPS) — runs serially after the section loop.
+
+Progress is reported through an optional `Reporter`; see `reporter.py`.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -21,7 +33,49 @@ from retrotool.build.diff import DiffResult, write_diff
 from retrotool.build.handlers import BuildContext, HandlerError, WriteRange, get_handler
 from retrotool.build.overflow import FreespaceAllocator
 from retrotool.build.interpolate import evaluate_condition
+from retrotool.build.reporter import Reporter, SectionStatus
 from retrotool.build.spec import BuildSpec, Section, SectionKind
+
+
+# Section kinds whose handler is safe to run in a worker thread:
+#   * never calls `ctx.allocator.alloc/reserve` (no shared mutable state)
+#   * never writes `ctx.labels` (`export-label` is applied by the driver
+#     post-handler, so workers don't touch the shared label dict)
+#   * either doesn't read `rom`, or reads it from a private scratch that
+#     was snapshotted at submit time (so reads see prior serial writes
+#     and the spec's per-section offsets don't overlap each other)
+# `fixed_records` joins the set: its only rom read is the stride-padding
+# preservation slice at `rom[offset:offset+stride*count]`. The worker
+# scratch is bytearray(rom-at-submit-time) so the slice resolves to the
+# same bytes the serial handler would have read, provided no other section
+# writes into that region — which a well-formed spec doesn't do anyway.
+_PARALLEL_KINDS = frozenset({
+    SectionKind.REP, SectionKind.INS, SectionKind.BIN,
+    SectionKind.GRAPHICS, SectionKind.FIXED_RECORDS,
+})
+
+
+def _is_parallel_eligible(section: Section) -> bool:
+    """True when `section` can be dispatched to the gather ThreadPool.
+
+    Beyond `_PARALLEL_KINDS`, ASAR sections opted in via `cache="1"` qualify:
+    diff-mode `handle_asar` returns a `list[WriteRange]` covering only the
+    bytes the patch actually changed, with no implicit dependency on later
+    sections' writes. The worker mutates its scratch fully (the handler
+    does `rom[:] = new_rom`); we then capture the bytes at the diff offsets
+    and apply them to the real rom in declared order.
+
+    Default-cache ASAR (no `cache="1"`) stays serial — its return value is
+    a single full-rom WriteRange that, in parallel, would clobber any prior
+    section's writes that were applied between submit and apply time.
+    `<libsfx>` and `<project>` are likewise inherently serial: they replace
+    or recursively rebuild the rom canvas.
+    """
+    if section.kind in _PARALLEL_KINDS:
+        return True
+    if section.kind == SectionKind.ASAR and section.cache:
+        return True
+    return False
 
 
 # Section kinds with writes deterministic from attrs+inputs. <asar> and
@@ -246,6 +300,25 @@ def _patch_checksum(rom: bytearray) -> Optional[int]:
     return csum
 
 
+def _section_label(section: Section) -> str:
+    """Short human-readable identifier for progress UI.
+
+    Prefers DataDef name → user-set alias/name → first input file → source
+    locator. Falls back to the kind string if nothing else is available.
+    """
+    if section.from_datadef:
+        return section.from_datadef
+    for key in ("name", "alias"):
+        v = section.attrs.get(key)
+        if isinstance(v, str) and v:
+            return v
+    if section.files:
+        return Path(str(section.files[0])).name
+    if section.source:
+        return section.source.split(":")[-1]
+    return section.kind.value
+
+
 def _section_kinds_filter(
     only: Optional[set[str]], skip: Optional[set[str]]
 ) -> Optional[Callable[[Section], bool]]:
@@ -299,6 +372,37 @@ def _section_kinds_filter(
     return keep
 
 
+@dataclass
+class _GatherResult:
+    """Output of a parallel-gather worker. `data` mirrors `writes`: one
+    bytes payload per WriteRange, captured from the worker's private scratch
+    buffer. Applied to the real rom in declared section order."""
+    writes: list[WriteRange]
+    data: list[bytes]
+
+
+def _gather_parallel(
+    section: Section, files_root: Path, scratch: bytearray,
+) -> _GatherResult:
+    """Worker entry: run a parallel-eligible handler against `scratch`.
+
+    `scratch` is a per-worker private copy of the original ROM (post-libsfx,
+    pre-section-writes). Pure-write handlers (`_PARALLEL_KINDS`) only call
+    `_write` against it, so they neither observe nor produce shared state.
+    Returns the WriteRange list emitted by the handler plus the bytes that
+    landed in `scratch` for each range — those are what the caller will
+    apply to the real rom in declared order."""
+    handler = get_handler(section.kind)
+    if handler is None:
+        raise HandlerError(
+            f"{section.source}: no handler for <{section.kind.value}>"
+        )
+    raw = handler(scratch, section, files_root, None)
+    writes = [raw] if isinstance(raw, WriteRange) else list(raw)
+    data = [bytes(scratch[w.offset:w.end]) for w in writes]
+    return _GatherResult(writes=writes, data=data)
+
+
 def build(
     spec: BuildSpec,
     *,
@@ -309,22 +413,31 @@ def build(
     only: Optional[set[str]] = None,
     skip: Optional[set[str]] = None,
     parallel: Optional[int] = None,
+    reporter: Optional[Reporter] = None,
 ) -> BuildResult:
     """Apply `spec` to `original_rom` and write to `out_path`.
 
-    `source_root` is the directory file= attrs are resolved against (typically the
-    directory of the .mbxml file, optionally combined with spec.path).
-    `original_rom` defaults to `spec.original` resolved relative to `source_root`.
+    `source_root` is the directory file= attrs are resolved against (typically
+    the directory of the .mbxml file, optionally combined with spec.path).
+    `original_rom` defaults to `spec.original` resolved relative to
+    `source_root`.
 
     `only` / `skip` filter sections by `kind` (e.g. {"asar","script"}).
     Filtered-out sections land in `BuildResult.skipped` alongside `if=`-skipped
     ones. Post-process steps (revbyte, pad, checksum, diff) always run.
 
-    `parallel` enables CPU-bound pre-encoding via `ProcessPoolExecutor`:
-    `None` skips parallel prep entirely (default — zero overhead for small
-    builds), `1` runs the prepare phase serially (debugging), any larger
-    integer caps the worker count (default `os.cpu_count()`).
-    """
+    `parallel` controls the gather-phase ThreadPoolExecutor used for
+    parallel-eligible section kinds (`_PARALLEL_KINDS`):
+      * `None` (default) → `os.cpu_count()` workers.
+      * `1` → fully serial (no thread pool created; useful for debugging).
+      * `N>1` → cap workers at `N`.
+    Determinism is preserved regardless: writes are applied in declared
+    section order against the single working ROM, so output bytes are
+    identical to the serial path.
+
+    `reporter` receives lifecycle events for every section (queued, gather
+    started, terminal). Pass `retrotool.build.reporter.make_reporter()` for
+    a TTY-aware default; pass `None` for a silent build."""
     t0 = perf_counter()
 
     # A <libsfx> section generates the ROM canvas itself, so `original` is
@@ -357,10 +470,6 @@ def build(
     if spec.path is not None:
         files_root = (source_root / Path(str(spec.path))).resolve()
 
-    if parallel is not None:
-        from retrotool.build.prepare import parallel_prepare
-        parallel_prepare(spec, files_root, max_workers=parallel)
-
     ctx = BuildContext(
         allocator=FreespaceAllocator.from_pairs(list(spec.freespace)) if spec.freespace else None,
         labels=dict(spec.labels) if hasattr(spec, "labels") and spec.labels else {},
@@ -389,72 +498,222 @@ def build(
             return False
         return True
 
+    # Resolve cache state per section once: avoids re-hashing input files in
+    # the freespace pre-pass and the apply loop.
+    section_cache_keys: dict[int, str] = {}
+    cache_hit_set: set[int] = set()
+    if cache:
+        for i, section in enumerate(spec.sections):
+            if not _section_is_kept(section):
+                continue
+            key = _section_cache_key(section, files_root)
+            if key:
+                section_cache_keys[i] = key
+                if cache.has(key):
+                    cache_hit_set.add(i)
+
     # Pre-pass: reserve freespace for every cached section we will replay.
     # Cache stores absolute PCs baked by a prior allocator pass; a fresh
     # alloc() for a non-cached section processed earlier in iteration order
     # would otherwise hand out the same bytes. Reserving up-front makes the
     # fix order-independent.
     if cache and ctx.allocator is not None:
-        for section in spec.sections:
-            if not _section_is_kept(section):
-                continue
-            cache_key = _section_cache_key(section, files_root)
-            if not cache_key or not cache.has(cache_key):
-                continue
+        for i in sorted(cache_hit_set):
             try:
-                entry = cache.get(cache_key)
+                entry = cache.get(section_cache_keys[i])
                 blob = entry.artifact.read_bytes()
                 ranges = _unpack_writes(blob)
             except (OSError, AttributeError, ValueError):
-                continue  # main loop will raise with a clearer error
+                continue  # apply loop will raise with a clearer error
             for off, data in ranges:
                 ctx.allocator.reserve(off, len(data))
 
-    for section in spec.sections:
-        if not _section_is_kept(section):
-            skipped.append(section)
-            continue
-        handler = get_handler(section.kind)
-        if handler is None:
-            raise HandlerError(
-                f"{section.source}: no handler for <{section.kind.value}> "
-                f"(landing in a later phase)"
+    # Notify reporter about every section so the progress UI can lay out rows
+    # in declared order.
+    if reporter is not None:
+        reporter.build_started(len(spec.sections))
+        for i, section in enumerate(spec.sections):
+            reporter.section_queued(i, _section_label(section), section.kind.value)
+
+    # Single-pass interleaved gather + apply. Parallel-eligible sections are
+    # submitted at their declared index against a snapshot of `rom` AS OF
+    # that moment (so any prior serial section's writes — libsfx canvas,
+    # asar patches — are visible in the worker's scratch). When a serial
+    # section is reached, we drain pending parallel futures whose declared
+    # index precedes it and apply their writes first; the serial handler
+    # then runs against the post-drain rom, matching legacy ordering.
+    futures: dict[int, Future[_GatherResult]] = {}
+    pool: Optional[ThreadPoolExecutor] = None
+    max_workers = (
+        os.cpu_count() if parallel is None else max(1, parallel)
+    )
+    if max_workers and max_workers > 1:
+        pool = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="retrotool-gather",
+        )
+
+    def _submit(idx: int, section: Section) -> None:
+        # Snapshot rom AT SUBMISSION TIME — captures all preceding serial
+        # writes so the worker scratch matches what serial execution would
+        # have observed. Pure-write handlers don't read rom, but they do
+        # call `_write(allow_grow=False)` which checks `len(scratch)`; an
+        # empty pre-libsfx snapshot would fail any rep at a high offset.
+        scratch = bytearray(rom)
+        if reporter is not None:
+            reporter.section_status(idx, SectionStatus.GATHER)
+        if pool is None:
+            fut: Future[_GatherResult] = Future()
+            try:
+                fut.set_result(_gather_parallel(section, files_root, scratch))
+            except Exception as exc:  # noqa: BLE001
+                fut.set_exception(exc)
+            futures[idx] = fut
+            return
+        futures[idx] = pool.submit(
+            _gather_parallel, section, files_root, scratch,
+        )
+
+    applied: set[int] = set()
+
+    def _apply_gathered(idx: int, section: Section) -> None:
+        """Wait on `futures[idx]`, write its bytes to `rom`, fire DONE."""
+        try:
+            gathered = futures[idx].result()
+        except Exception as exc:  # noqa: BLE001
+            if reporter is not None:
+                reporter.section_status(idx, SectionStatus.ERROR, note=str(exc))
+            raise
+        if reporter is not None:
+            reporter.section_status(idx, SectionStatus.APPLY)
+        bytes_written = 0
+        for wr, data in zip(gathered.writes, gathered.data):
+            end = wr.offset + len(data)
+            if end > len(rom):
+                rom.extend(b"\x00" * (end - len(rom)))
+            rom[wr.offset:end] = data
+            bytes_written += len(data)
+        section_results.append(SectionResult(section=section, write=gathered.writes))
+        export_name = section.attrs.get("export-label")
+        if export_name and gathered.writes:
+            ctx.labels[export_name] = gathered.writes[0].offset
+        if cache and idx in section_cache_keys:
+            cache.put(
+                section_cache_keys[idx],
+                _pack_writes(bytes(rom), gathered.writes),
+                meta={"kind": section.kind.value,
+                      "source": section.source or ""},
+            )
+        applied.add(idx)
+        if reporter is not None:
+            reporter.section_status(
+                idx, SectionStatus.DONE, bytes_written=bytes_written,
             )
 
-        cache_key = _section_cache_key(section, files_root) if cache else None
-        if cache and cache_key and cache.has(cache_key):
-            try:
-                entry = cache.get(cache_key)
-                blob = entry.artifact.read_bytes()
-                ranges = _unpack_writes(blob)
-            except (OSError, AttributeError, ValueError) as exc:
-                raise HandlerError(
-                    f"{section.source}: cached artifact unreadable for key "
-                    f"{cache_key[:12]}…: {exc}"
-                ) from exc
-            cached_writes: list[WriteRange] = []
-            for off, data in ranges:
-                end = off + len(data)
-                if end > len(rom):
-                    rom.extend(b"\x00" * (end - len(rom)))
-                rom[off:end] = data
-                cached_writes.append(WriteRange(offset=off, length=len(data)))
-            section_results.append(SectionResult(
-                section=section, write=cached_writes, cache_hit=True,
-            ))
-            cache_hits += 1
-            continue
+    def _drain_through(upto_idx: int) -> None:
+        """Apply any pending parallel-gather results with index < upto_idx,
+        in declared order. Called before any serial-section work so that
+        serial handlers (asar, script, etc.) observe prior parallel writes."""
+        for j in sorted(j for j in futures if j < upto_idx and j not in applied):
+            _apply_gathered(j, spec.sections[j])
 
-        raw = handler(rom, section, files_root, ctx)
-        writes: list[WriteRange] = [raw] if isinstance(raw, WriteRange) else list(raw)
-        section_results.append(SectionResult(section=section, write=writes))
-        # `export-label` registers a global label at the section's first write.
-        export_name = section.attrs.get("export-label")
-        if export_name and writes:
-            ctx.labels[export_name] = writes[0].offset
-        if cache and cache_key:
-            cache.put(cache_key, _pack_writes(bytes(rom), writes),
-                      meta={"kind": section.kind.value, "source": section.source or ""})
+    try:
+        for i, section in enumerate(spec.sections):
+            if not _section_is_kept(section):
+                skipped.append(section)
+                if reporter is not None:
+                    reason = "filtered" if keep_kind and not keep_kind(section) else "condition"
+                    reporter.section_status(i, SectionStatus.SKIPPED, note=reason)
+                continue
+
+            handler = get_handler(section.kind)
+            if handler is None:
+                raise HandlerError(
+                    f"{section.source}: no handler for <{section.kind.value}> "
+                    f"(landing in a later phase)"
+                )
+
+            # Cache hit — apply stored writes directly. (Cached sections
+            # don't need a snapshot; their bytes are already known.)
+            if i in cache_hit_set:
+                # Drain any earlier parallel work first so writes apply in
+                # declared order — a later cache-hit section that overlaps
+                # an earlier parallel write would otherwise lose data.
+                _drain_through(i)
+                key = section_cache_keys[i]
+                try:
+                    entry = cache.get(key)
+                    blob = entry.artifact.read_bytes()
+                    ranges = _unpack_writes(blob)
+                except (OSError, AttributeError, ValueError) as exc:
+                    raise HandlerError(
+                        f"{section.source}: cached artifact unreadable for "
+                        f"key {key[:12]}…: {exc}"
+                    ) from exc
+                cached_writes: list[WriteRange] = []
+                bytes_written = 0
+                for off, data in ranges:
+                    end = off + len(data)
+                    if end > len(rom):
+                        rom.extend(b"\x00" * (end - len(rom)))
+                    rom[off:end] = data
+                    cached_writes.append(WriteRange(offset=off, length=len(data)))
+                    bytes_written += len(data)
+                section_results.append(SectionResult(
+                    section=section, write=cached_writes, cache_hit=True,
+                ))
+                cache_hits += 1
+                if reporter is not None:
+                    reporter.section_status(
+                        i, SectionStatus.CACHE_HIT, bytes_written=bytes_written,
+                    )
+                continue
+
+            # Parallel-eligible: snapshot rom NOW, dispatch worker, continue.
+            # We don't apply yet — apply happens when a later serial section
+            # drains us, or at end-of-loop.
+            if _is_parallel_eligible(section):
+                _submit(i, section)
+                continue
+
+            # Serial path — asar / libsfx / project / script / fixed_records /
+            # windowed_script. Drain prior parallel work first so the handler
+            # observes those writes, then run against the shared rom.
+            _drain_through(i)
+            if reporter is not None:
+                reporter.section_status(i, SectionStatus.GATHER)
+            try:
+                raw = handler(rom, section, files_root, ctx)
+            except Exception as exc:  # noqa: BLE001
+                if reporter is not None:
+                    reporter.section_status(
+                        i, SectionStatus.ERROR, note=str(exc),
+                    )
+                raise
+            writes = [raw] if isinstance(raw, WriteRange) else list(raw)
+            bytes_written = sum(w.length for w in writes)
+            section_results.append(SectionResult(section=section, write=writes))
+            export_name = section.attrs.get("export-label")
+            if export_name and writes:
+                ctx.labels[export_name] = writes[0].offset
+            if cache and i in section_cache_keys:
+                cache.put(
+                    section_cache_keys[i],
+                    _pack_writes(bytes(rom), writes),
+                    meta={"kind": section.kind.value,
+                          "source": section.source or ""},
+                )
+            applied.add(i)
+            if reporter is not None:
+                reporter.section_status(
+                    i, SectionStatus.DONE, bytes_written=bytes_written,
+                )
+
+        # End-of-loop drain: trailing parallel sections (no later serial
+        # section to force a flush) apply now, in declared order.
+        _drain_through(len(spec.sections))
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     # Revision byte patch. Convention: plain digits parse as decimal; anything
     # else is treated as hex (with optional `0x`/`$` prefix stripped).
@@ -501,7 +760,7 @@ def build(
                 fmt, original_path=original_rom, modified_path=out_path,
             ))
 
-    return BuildResult(
+    result = BuildResult(
         rom_path=out_path,
         rom_size=len(rom),
         sections=section_results,
@@ -511,3 +770,12 @@ def build(
         diffs=diffs,
         cache_hits=cache_hits,
     )
+    if reporter is not None:
+        summary = (
+            f"built {out_path.name} · {len(rom):,}b · "
+            f"{len(section_results)} section(s) "
+            f"({cache_hits} cached, {len(skipped)} skipped) · "
+            f"{result.duration_ms} ms"
+        )
+        reporter.build_done(ok=True, summary=summary)
+    return result

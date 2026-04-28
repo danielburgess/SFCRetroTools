@@ -177,6 +177,7 @@ def _split_csv(s: Optional[str]) -> Optional[set[str]]:
 def _cmd_mbuild_build(args: argparse.Namespace) -> int:
     from retrotool.core.cache import BuildCache
     from retrotool.build import build
+    from retrotool.build.reporter import make_reporter
     spec, spec_file = _load_spec(
         Path(args.path), defines=_parse_defines(args.define),
     )
@@ -189,11 +190,21 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
         name = spec.name or spec_file.stem
         out = source_root / f"{name}.sfc"
     cache = None if args.no_cache else BuildCache(source_root / ".cache")
-    result = build(
-        spec, source_root=source_root, out_path=out, cache=cache,
-        only=_split_csv(args.only), skip=_split_csv(args.skip),
-        parallel=args.jobs,
-    )
+    # Pick a reporter: TTY → animated braille spinner; else line-per-event log.
+    # `--no-progress` forces silent (None reporter — build runs without UI).
+    if args.no_progress:
+        reporter = None
+    else:
+        reporter = make_reporter(
+            animate=(None if args.progress is None else args.progress),
+            stream=sys.stderr,
+        )
+    with reporter or _NullCm():
+        result = build(
+            spec, source_root=source_root, out_path=out, cache=cache,
+            only=_split_csv(args.only), skip=_split_csv(args.skip),
+            parallel=args.jobs, reporter=reporter,
+        )
     print(f"rom:       {result.rom_path}")
     print(f"size:      {result.rom_size} bytes")
     if result.checksum is not None:
@@ -207,6 +218,13 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
             print(f"diff:      {d.format} → {d.path} ({d.size} bytes)")
     print(f"duration:  {result.duration_ms} ms")
     return 0
+
+
+class _NullCm:
+    """No-op context manager used when `reporter is None` so the same `with`
+    block handles both progress-on and progress-off paths."""
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
 
 
 def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
@@ -334,8 +352,14 @@ def _build_parser() -> argparse.ArgumentParser:
     bb.add_argument("--skip", default=None,
                     help="comma-separated section kinds OR names to skip")
     bb.add_argument("-j", "--jobs", type=int, default=None,
-                    help="parallel pre-encoding workers (default: serial); "
-                         "1 = serial prepare phase, N = ProcessPoolExecutor cap")
+                    help="gather-phase worker thread count "
+                         "(default: os.cpu_count(); 1 = fully serial)")
+    bb.add_argument("--progress", dest="progress", action="store_true",
+                    default=None,
+                    help="force the animated braille progress reporter even "
+                         "when stderr is not a TTY")
+    bb.add_argument("--no-progress", action="store_true",
+                    help="disable the progress reporter entirely")
     bb.add_argument("-D", "--define", action="append", default=None,
                     metavar="NAME=VALUE",
                     help="override a spec variable (e.g. -D version=en); "
