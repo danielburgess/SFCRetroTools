@@ -53,6 +53,222 @@ can mix:
 > from a GitHub repo by reference), and lets you modify each game with a
 > single workbench. See [Where this is going](#where-this-is-going) below.
 
+## CLI Reference
+
+Every subcommand is reachable as `retrotool <cmd>` after install. Each one is a thin wrapper over the same library APIs documented under [What Each Module Is For](#what-each-module-is-for) — anything the CLI does, you can do from Python.
+
+```
+retrotool build    <path> [options]    # spec → ROM
+retrotool extract  <path> [options]    # ROM → source files (symmetric to build)
+retrotool migrate  <file>   [options]  # MBuild 1.29 → unified retrotool form
+retrotool libsfx   {scaffold|build|info|clean} [...]
+```
+
+`<path>` for `build` / `extract` may be a `.mbxml` file, a `.toml` file, or a directory containing either. When both `project.toml` and `*.mbxml` live in the same directory, `project.toml` wins.
+
+---
+
+### `retrotool build`
+
+Apply a build spec to its `original=` ROM (or a `<libsfx>`-generated canvas) and write the result.
+
+```
+retrotool build <path>
+                [-o, --output OUT]
+                [--no-cache]
+                [--diff ips|xdelta|both]
+                [--only KINDS]
+                [--skip KINDS]
+                [-j, --jobs N]
+                [--progress | --no-progress]
+                [-D NAME=VALUE]...
+```
+
+| flag | description |
+|---|---|
+| `path` | **required.** `.mbxml` / `.toml` file or directory containing one. |
+| `-o`, `--output OUT` | output ROM path. default: `<spec.name or spec.stem>.sfc` next to the spec. |
+| `--no-cache` | disable the per-section `BuildCache`. forces every section to re-run its handler. |
+| `--diff {ips,xdelta,both}` | override the spec's `diff=` setting. emits patches alongside the ROM. |
+| `--only KINDS` | comma-separated section **kinds** *or* **names** to run; everything else lands in `result.skipped`. matches `kind.value`, `from_datadef`, `attrs.name`, `attrs.alias`, and `source` suffixes. |
+| `--skip KINDS` | comma-separated kinds/names to exclude. |
+| `-j N`, `--jobs N` | gather-phase ThreadPool worker count. default = `os.cpu_count()`. `-j 1` = fully serial (debugging non-determinism). parallel-eligible kinds: `rep`, `ins`, `bin`, `graphics`, `fixed-records`, plus `<asar cache="1">` (diff-mode). |
+| `--progress` | force the animated braille spinner even when stderr is not a TTY (e.g. piping through `tee`). |
+| `--no-progress` | disable the progress reporter entirely. CI / log-only environments. |
+| `-D NAME=VALUE`, `--define NAME=VALUE` | override a spec variable. repeatable; later wins on duplicate keys. applies to both MBXML and TOML front-ends. |
+
+**Examples:**
+
+```bash
+# Plain build — auto-detects spec, writes <name>.sfc next to it
+retrotool build my-game/
+
+# Custom output, xdelta-only diff, 4 workers
+retrotool build my-game/project.toml -o build/patched.sfc --diff xdelta -j 4
+
+# Build only asar patches and one named script section
+retrotool build my-game/ --only asar,main_dialog
+
+# CI: log lines only, no animation, no cache (force fresh)
+retrotool build my-game/ --no-progress --no-cache
+
+# Multi-locale build with -D overrides
+retrotool build my-game/ -D version=en -D include_credits=1 -o builds/en.sfc
+retrotool build my-game/ -D version=jp                       -o builds/jp.sfc
+
+# Debugging non-deterministic output: force serial + bypass cache
+retrotool build my-game/ -j 1 --no-cache
+
+# Force animation when stdout is captured (e.g. asciinema)
+retrotool build my-game/ --progress 2> build.log
+```
+
+---
+
+### `retrotool extract`
+
+Extract ROM data back to source files per the spec — the symmetric counterpart to `build`. Same handler set; same section filters.
+
+```
+retrotool extract <path>
+                  [--lang CODE | --dest DIR]
+                  [-y, --yes]
+                  [--only KINDS]
+                  [--skip KINDS]
+                  [-D NAME=VALUE]...
+```
+
+| flag | description |
+|---|---|
+| `path` | **required.** spec file or directory (same rules as `build`). |
+| `--lang CODE` | language code; resolved via the `<code>_data_dir=` scalar in `project.toml` (e.g. `--lang en` reads from `en_data_dir`). DataDef `file=` auto-defaults land under that dir. **mutually exclusive with `--dest`.** |
+| `--dest DIR` | absolute destination root, bypasses the lang/data_dir lookup. **mutually exclusive with `--lang`.** |
+| `-y`, `--yes` | skip the interactive overwrite-confirmation prompt. extract refuses overwrite when stdin is non-TTY unless `-y` is set (safe default for CI / piped scripts). |
+| `--only KINDS`, `--skip KINDS` | section filters, same syntax as `build`. |
+| `-D NAME=VALUE`, `--define NAME=VALUE` | spec-variable override. repeatable. |
+
+`extract` is **explicit** about destination — you must pass one of `--lang`, `--dest`, or set `[extract].default_lang` in the spec, otherwise it errors out. Silent defaults have clobbered translation files in the past; this guard is intentional.
+
+**Examples:**
+
+```bash
+# Extract using project.toml [extract].default_lang
+retrotool extract my-game/
+
+# Extract Japanese sources to the JP data dir from `jp_data_dir=` in project.toml
+retrotool extract my-game/ --lang jp
+
+# Extract to a one-off directory; accept overwrites without prompting
+retrotool extract my-game/ --dest /tmp/extract-preview --yes
+
+# Only extract script + fixed-records sections
+retrotool extract my-game/ --lang en --only script,fixed-records
+
+# Re-extract with a different `version=` define (e.g. extract patched-side data)
+retrotool extract my-game/ --lang en -D version=patched
+```
+
+---
+
+### `retrotool migrate`
+
+Rewrite a legacy MBuild 1.29 `.mbxml` into the unified retrotool form (e.g. `<lzr> → <bin codec=>`, `<bpr> → <graphics>`, `<sbr> → <script>`). One-shot tool — once a project is migrated you don't need it again.
+
+```
+retrotool migrate <file.mbxml> [--in-place]
+```
+
+| flag | description |
+|---|---|
+| `file.mbxml` | **required.** must be `.mbxml` or `.xml`. directories and `.toml` raise. |
+| `--in-place` | rewrite the file and save a `.bak` next to it. without this flag the migrated XML prints to stdout. |
+
+**Examples:**
+
+```bash
+# Preview the migration (stdout, file untouched)
+retrotool migrate legacy.mbxml
+
+# Inspect the diff before committing
+retrotool migrate legacy.mbxml | diff legacy.mbxml -
+
+# Rewrite in place; legacy.mbxml.bak is the backup
+retrotool migrate legacy.mbxml --in-place
+```
+
+---
+
+### `retrotool libsfx`
+
+Subcommands for libSFX-layout assembly projects (ca65/ld65 + libSFX runtime). Requires the [`retrotool[libsfx]` extra](#libsfx-assembly-projects), which bundles the full Optiroc toolchain as prebuilt binaries.
+
+#### `retrotool libsfx scaffold <dir>`
+
+Create a fresh libSFX project from a bundled template.
+
+| flag | description |
+|---|---|
+| `dir` | **required.** destination directory. must not exist or must be empty. |
+| `--template NAME` | bundled libSFX example template to clone. default `Template`. |
+
+```bash
+retrotool libsfx scaffold demo
+retrotool libsfx scaffold hello-world --template Hello
+```
+
+#### `retrotool libsfx build [<dir>]`
+
+Assemble + link + post-process a libSFX project. Writes `<dir>/<name>.sfc`; with `--debug>=1` also writes `.sym` / `.map`; with `--debug=2` adds Mesen `.bp` breakpoints.
+
+| flag | description |
+|---|---|
+| `dir` | project directory. default `.`. |
+| `--debug {0,1,2}` | override the project's debug level. `0` = release, `1` = sym + map, `2` = sym + map + Mesen `.bp`. |
+| `-o`, `--output OUT` | output ROM path. default: `<dir>/<name>.sfc`. |
+
+```bash
+# Build current dir at the project's configured debug level
+retrotool libsfx build
+
+# Build a specific dir at full debug; custom output path
+retrotool libsfx build demo --debug 2 -o builds/demo-debug.sfc
+
+# Release build (skip sym/map even if project.toml requests it)
+retrotool libsfx build demo --debug 0
+```
+
+#### `retrotool libsfx info [<dir>]`
+
+Print discovered sources + config without building. Useful to verify which `.s` / `.cfg` / asset files the project will pick up before kicking off a build.
+
+```bash
+retrotool libsfx info demo
+```
+
+#### `retrotool libsfx clean [<dir>]`
+
+Remove `.build/` and the built `.sfc`. Keeps `.cache/` by default so cached asar/section artifacts survive.
+
+| flag | description |
+|---|---|
+| `dir` | project directory. default `.`. |
+| `--full` | also wipe `.cache/`. forces every cached section to rebuild on next `build`. |
+
+```bash
+retrotool libsfx clean              # remove .build + ROM, keep .cache
+retrotool libsfx clean --full       # nuclear: also wipe BuildCache
+```
+
+---
+
+### Exit codes
+
+| code | meaning |
+|---|---|
+| `0` | success |
+| `1` | uncaught error (printed as `error: <msg>` on stderr) |
+| `2` | extract destination ambiguous (`--lang` not in `data_dirs_by_lang`, or no dest specified at all) |
+
 ## Package Layout
 
 ```
@@ -230,16 +446,8 @@ LLM-assisted reverse-engineering scaffolding.
 
 `retrotool.build` is an MBuild 1.29-compatible build pipeline plus extensions.
 Every element on a build spec describes one piece of ROM data; the same spec
-drives **build** (files → ROM) and **extract** (ROM → files).
-
-```
-retrotool build   <path> [-o out.sfc] [--no-cache] [--diff ips|xdelta|both]
-retrotool extract <path> [--dest DIR]
-retrotool migrate <file.mbxml> [--in-place]
-```
-
-`<path>` may be a `.mbxml`, a `.toml`, or a directory containing either
-(`project.toml` wins over `*.mbxml`).
+drives **build** (files → ROM) and **extract** (ROM → files). See the [CLI
+Reference](#cli-reference) for the full flag set.
 
 ### MBuild 1.29 compatibility
 
