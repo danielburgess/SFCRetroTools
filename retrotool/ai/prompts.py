@@ -1,4 +1,7 @@
-"""Prompt templates for RE / ROM-hacking workflows."""
+"""`str.format`-style prompt templates for RE / ROM-hacking workflows.
+
+Consumed by external LLM-driven scripts; this module sends nothing on its own.
+"""
 from __future__ import annotations
 
 IDENTIFY_COMPRESSION = """\

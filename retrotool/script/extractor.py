@@ -38,8 +38,8 @@ def extract_script(
     ptrs = datadef.pointers
     terminator = datadef.encoding.terminator if datadef.encoding else 0x00
 
-    ptr_pc = _to_pc(ptrs.address, address_type)
-    data_start_pc = _to_pc(datadef.data.start, address_type)
+    ptr_pc = _to_pc(ptrs.offset, address_type)
+    data_start_pc = _to_pc(datadef.data.offset, address_type)
     data_end_pc = _to_pc(datadef.data.end, address_type) if datadef.data.end else len(rom)
 
     entries: list[ScriptEntry] = []
@@ -47,7 +47,7 @@ def extract_script(
         p_off = ptr_pc + i * ptrs.size
         if ptrs.size == 2:
             rel = read_u16_le(rom, p_off)
-            bank = ptrs.bank_override or SFCAddress.bank_byte(datadef.data.start)
+            bank = ptrs.bank_override or SFCAddress.bank_byte(datadef.data.offset)
             snes = (bank << 16) | rel
         else:
             snes = read_u24_le(rom, p_off)

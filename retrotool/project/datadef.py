@@ -54,6 +54,13 @@ class BuildStep:
     overflow: dict = field(default_factory=dict)  # strategy/marker/splitter/...
     placement: dict = field(default_factory=dict) # {mode: "overflow"|"relocate"}
     cache: Optional[bool] = None                  # opt-in/out of per-section caching
+    # Per-entry override for the windowed-script "preserve byte at $START"
+    # behavior. Default = preserve (FFC0 stub at $START+1, byte at $START
+    # left in ROM). Listed entry indices flip to clobber-mode (FFC0 stub at
+    # $START) for ALL their windows. Useful when the byte at $START is an
+    # unwanted JP residual (e.g. full-width space) that would render as an
+    # extra leading glyph in front of the window's overflow content.
+    clobber_lead_entries: list = field(default_factory=list)
     extras: dict = field(default_factory=dict)    # forward-compat raw attrs
 
 
@@ -61,13 +68,6 @@ class BuildStep:
 class RelocationSection:
     target: int
     pointer_size: int = 3
-
-
-@dataclass
-class DisplaySection:
-    word_wrap_width: Optional[int] = None
-    word_wrap_lines: Optional[int] = None
-    windowed: bool = False
 
 
 @dataclass
@@ -80,7 +80,6 @@ class DataDef:
     pointers: Optional[PointersSection] = None
     data: Optional[DataSection] = None
     relocation: Optional[RelocationSection] = None
-    display: Optional[DisplaySection] = None
     section: Optional[BuildStep] = None   # `[section]` sub-table (opt-in build)
     extras: dict = field(default_factory=dict)
 
@@ -157,15 +156,6 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
             pointer_size=int(r.get("pointer_size", 3)),
         )
 
-    display = None
-    if disp := doc.get("display"):
-        ww = disp.get("word_wrap") or {}
-        display = DisplaySection(
-            word_wrap_width=int(ww["width"]) if "width" in ww else None,
-            word_wrap_lines=int(ww["lines"]) if "lines" in ww else None,
-            windowed=bool(disp.get("windowed", False)),
-        )
-
     section = None
     sec_doc = doc.get("section")
     # Presence (even empty) signals "include in build pipeline". Empty is
@@ -192,7 +182,7 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
                 f"those live in [pointers]/[data]/[encoding]/[word_wrap]/extras"
             )
         known = {"kind", "file", "en_file", "grow", "codec", "if", "offset",
-                 "overflow", "placement", "cache"}
+                 "overflow", "placement", "cache", "clobber_lead_entries"}
         # `en_file` is the preferred key; `file` is kept as a legacy alias.
         # Resolver auto-defaults when both are absent (→ {en_data_dir}/{name}.txt).
         en_file = sec_doc.get("en_file")
@@ -232,12 +222,13 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
             overflow=dict(sec_doc.get("overflow") or {}),
             placement=dict(placement or {}),
             cache=cache_val,
+            clobber_lead_entries=list(sec_doc.get("clobber_lead_entries") or []),
             extras={k: v for k, v in sec_doc.items() if k not in known},
         )
 
     extras = {k: v for k, v in doc.items() if k not in
               {"table", "encoding", "pointers", "data", "relocation",
-               "display", "section"}}
+               "section"}}
 
     return DataDef(
         name=name,
@@ -247,7 +238,6 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
         pointers=pointers,
         data=data,
         relocation=relocation,
-        display=display,
         section=section,
         extras=extras,
     )

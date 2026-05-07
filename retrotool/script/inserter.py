@@ -12,7 +12,7 @@ from retrotool.script.table import Table
 @dataclass
 class InsertedScript:
     pointer_table: bytes        # bytes to write to pointer table location
-    data_block: bytes           # contiguous compiled string data
+    data_block: bytes           # contiguous encoded string data
     data_base: int              # SNES address of first string in data_block
     entry_offsets: list[int] = field(default_factory=list)  # PC offset into data_block per entry
 
@@ -34,7 +34,7 @@ def compile_script(
 
     terminator = datadef.encoding.terminator if datadef.encoding else 0x00
     target_snes = (datadef.relocation.target if datadef.relocation else
-                   (data_base if data_base is not None else (datadef.data.start if datadef.data else 0)))
+                   (data_base if data_base is not None else (datadef.data.offset if datadef.data else 0)))
     pointer_size = datadef.relocation.pointer_size if datadef.relocation else ptrs.size
 
     data = bytearray()

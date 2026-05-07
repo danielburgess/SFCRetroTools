@@ -54,6 +54,16 @@ _PARALLEL_KINDS = frozenset({
     SectionKind.GRAPHICS, SectionKind.FIXED_RECORDS,
 })
 
+# Script kinds whose heavy encode phase (file I/O + table-driven encoding)
+# runs in a worker via `script_prepare`; the apply phase stays serial because
+# placement still touches `ctx.allocator` and reads `ctx.labels`. The worker
+# returns a `_PreparedScript` payload that the apply phase passes back into
+# `handle_script` so the placement/fixup-resolve loop can run with the
+# correct (fully-populated) shared state.
+_SCRIPT_PARALLEL_KINDS = frozenset({
+    SectionKind.SCRIPT, SectionKind.WINDOWED_SCRIPT,
+})
+
 
 def _is_parallel_eligible(section: Section) -> bool:
     """True when `section` can be dispatched to the gather ThreadPool.
@@ -76,6 +86,13 @@ def _is_parallel_eligible(section: Section) -> bool:
     if section.kind == SectionKind.ASAR and section.cache:
         return True
     return False
+
+
+def _is_script_parallel_eligible(section: Section) -> bool:
+    """True when `section` is a script kind whose encode phase is worth
+    pushing to a worker. Placement still happens serially via `_apply_gathered`
+    (see the script-prepare worker pathway in `build()`)."""
+    return section.kind in _SCRIPT_PARALLEL_KINDS
 
 
 # Section kinds with writes deterministic from attrs+inputs. <asar> and
@@ -374,11 +391,20 @@ def _section_kinds_filter(
 
 @dataclass
 class _GatherResult:
-    """Output of a parallel-gather worker. `data` mirrors `writes`: one
-    bytes payload per WriteRange, captured from the worker's private scratch
-    buffer. Applied to the real rom in declared section order."""
-    writes: list[WriteRange]
-    data: list[bytes]
+    """Output of a parallel-gather worker. Two shapes:
+
+    * Pure-write kinds (REP/INS/BIN/GRAPHICS/FIXED_RECORDS, opt-in ASAR):
+      `writes` + `data` (one bytes payload per WriteRange, captured from the
+      worker's private scratch). Applied via memcpy in declared section order.
+
+    * Script kinds (SCRIPT/WINDOWED_SCRIPT): `prepared` is the encoded
+      payload from `script_prepare`. The apply phase invokes `handle_script`
+      against the live rom with `prepared=` so placement/fixup-resolve sees
+      the fully-populated `ctx.allocator` and `ctx.labels`.
+    """
+    writes: list[WriteRange] = field(default_factory=list)
+    data: list[bytes] = field(default_factory=list)
+    prepared: Optional[object] = None  # _PreparedScript when set
 
 
 def _gather_parallel(
@@ -401,6 +427,20 @@ def _gather_parallel(
     writes = [raw] if isinstance(raw, WriteRange) else list(raw)
     data = [bytes(scratch[w.offset:w.end]) for w in writes]
     return _GatherResult(writes=writes, data=data)
+
+
+def _gather_script_prepare(
+    section: Section, files_root: Path, scratch: bytearray,
+) -> _GatherResult:
+    """Worker entry: run `script_prepare` against a rom snapshot.
+
+    No allocator, no labels — those are touched only by the apply phase.
+    Returns a `_GatherResult` carrying the `_PreparedScript` payload; the
+    apply phase invokes `handle_script` against the live rom with the
+    prepared payload."""
+    from retrotool.build.handlers import script_prepare as _script_prepare
+    prepared = _script_prepare(bytes(scratch), section, files_root)
+    return _GatherResult(prepared=prepared)
 
 
 def build(
@@ -558,25 +598,54 @@ def build(
         # have observed. Pure-write handlers don't read rom, but they do
         # call `_write(allow_grow=False)` which checks `len(scratch)`; an
         # empty pre-libsfx snapshot would fail any rep at a high offset.
+        # Script workers read the snapshot to populate `_PreparedScript.
+        # source_snapshot` (used by overflow placement and `slot-measure
+        # =source-entry`) but do NOT touch the live rom or shared state.
         scratch = bytearray(rom)
-        if reporter is not None:
-            reporter.section_status(idx, SectionStatus.GATHER)
+        worker_fn = (
+            _gather_script_prepare
+            if _is_script_parallel_eligible(section)
+            else _gather_parallel
+        )
+
+        # Fire GATHER from inside the worker (i.e. when a pool thread actually
+        # picks the task up) rather than at submit-time. Otherwise the
+        # reporter's per-section timer starts at queue-time and elapsed_ms
+        # conflates queue-wait with actual work time. Fire GATHER_DONE in
+        # `finally` so the reporter can drop the section out of the live
+        # "active" region the moment the worker returns — without it, finished
+        # tasks pile up visibly until the main thread eventually drains them.
+        def _run() -> _GatherResult:
+            if reporter is not None:
+                reporter.section_status(idx, SectionStatus.GATHER)
+            try:
+                return worker_fn(section, files_root, scratch)
+            finally:
+                if reporter is not None:
+                    reporter.section_status(idx, SectionStatus.GATHER_DONE)
+
         if pool is None:
             fut: Future[_GatherResult] = Future()
             try:
-                fut.set_result(_gather_parallel(section, files_root, scratch))
+                fut.set_result(_run())
             except Exception as exc:  # noqa: BLE001
                 fut.set_exception(exc)
             futures[idx] = fut
             return
-        futures[idx] = pool.submit(
-            _gather_parallel, section, files_root, scratch,
-        )
+        futures[idx] = pool.submit(_run)
 
     applied: set[int] = set()
 
     def _apply_gathered(idx: int, section: Section) -> None:
-        """Wait on `futures[idx]`, write its bytes to `rom`, fire DONE."""
+        """Wait on `futures[idx]`, apply its result to `rom`, fire DONE.
+
+        Two result shapes:
+          * Pure-write (REP/INS/BIN/GRAPHICS/FIXED_RECORDS, opt-in ASAR):
+            memcpy `gathered.data` into `rom` at `gathered.writes` offsets.
+          * Script-prepared: invoke the handler against the live rom with
+            `prepared=gathered.prepared` so placement/fixup-resolve sees
+            the fully-populated `ctx.allocator` and `ctx.labels`.
+        """
         try:
             gathered = futures[idx].result()
         except Exception as exc:  # noqa: BLE001
@@ -586,20 +655,46 @@ def build(
         if reporter is not None:
             reporter.section_status(idx, SectionStatus.APPLY)
         bytes_written = 0
-        for wr, data in zip(gathered.writes, gathered.data):
-            end = wr.offset + len(data)
-            if end > len(rom):
-                rom.extend(b"\x00" * (end - len(rom)))
-            rom[wr.offset:end] = data
-            bytes_written += len(data)
-        section_results.append(SectionResult(section=section, write=gathered.writes))
+
+        if _is_script_parallel_eligible(section):
+            # Script worker — invoke handler against live rom with the
+            # prepared payload (may be None when `script_prepare` declined,
+            # e.g. legacy concat mode; the handler then encodes inline).
+            handler = get_handler(section.kind)
+            if handler is None:
+                raise HandlerError(
+                    f"{section.source}: no handler for <{section.kind.value}>"
+                )
+            try:
+                raw = handler(
+                    rom, section, files_root, ctx,
+                    prepared=gathered.prepared,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if reporter is not None:
+                    reporter.section_status(
+                        idx, SectionStatus.ERROR, note=str(exc),
+                    )
+                raise
+            writes = [raw] if isinstance(raw, WriteRange) else list(raw)
+            bytes_written = sum(w.length for w in writes)
+        else:
+            writes = gathered.writes
+            for wr, data in zip(gathered.writes, gathered.data):
+                end = wr.offset + len(data)
+                if end > len(rom):
+                    rom.extend(b"\x00" * (end - len(rom)))
+                rom[wr.offset:end] = data
+                bytes_written += len(data)
+
+        section_results.append(SectionResult(section=section, write=writes))
         export_name = section.attrs.get("export-label")
-        if export_name and gathered.writes:
-            ctx.labels[export_name] = gathered.writes[0].offset
+        if export_name and writes:
+            ctx.labels[export_name] = writes[0].offset
         if cache and idx in section_cache_keys:
             cache.put(
                 section_cache_keys[idx],
-                _pack_writes(bytes(rom), gathered.writes),
+                _pack_writes(bytes(rom), writes),
                 meta={"kind": section.kind.value,
                       "source": section.source or ""},
             )
@@ -670,14 +765,16 @@ def build(
 
             # Parallel-eligible: snapshot rom NOW, dispatch worker, continue.
             # We don't apply yet — apply happens when a later serial section
-            # drains us, or at end-of-loop.
-            if _is_parallel_eligible(section):
+            # drains us, or at end-of-loop. Script-parallel sections push only
+            # the encode phase to the worker; placement (which calls
+            # ctx.allocator and reads ctx.labels) runs serially in apply.
+            if _is_parallel_eligible(section) or _is_script_parallel_eligible(section):
                 _submit(i, section)
                 continue
 
-            # Serial path — asar / libsfx / project / script / fixed_records /
-            # windowed_script. Drain prior parallel work first so the handler
-            # observes those writes, then run against the shared rom.
+            # Serial path — asar / libsfx / project / fixed_records.
+            # Drain prior parallel work first so the handler observes those
+            # writes, then run against the shared rom.
             _drain_through(i)
             if reporter is not None:
                 reporter.section_status(i, SectionStatus.GATHER)

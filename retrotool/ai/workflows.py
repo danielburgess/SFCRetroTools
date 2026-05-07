@@ -1,4 +1,7 @@
-"""Guided RE workflow step definitions."""
+"""Canned `WorkflowStep` sequences for external LLM-driven RE orchestrators.
+
+Each step is a static prompt + expected_output pair; this module provides no executor.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

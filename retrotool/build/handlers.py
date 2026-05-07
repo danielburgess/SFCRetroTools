@@ -33,6 +33,35 @@ class HandlerError(RuntimeError):
 
 
 @dataclass
+class _PreparedScript:
+    """Worker-encoded script payload — produced by `script_prepare()` against
+    a rom snapshot, consumed by `handle_script()` / `_handle_script_windowed()`
+    in the serial apply phase. Captures the pure encode-phase outputs (file
+    I/O + table-driven encoding + sentinel detection) so the apply phase only
+    does placement, allocator allocation, and label fixup resolution.
+
+    `mode` selects which set of fields are populated:
+      * `"relocate"` — `entries` from encode_script_file plus optional
+        `source_snapshot` for slot-measure="source-entry".
+      * `"overflow"` — `auto_entries` (encode_script_file output for the
+        auto-window path), `windowed` (encode_windowed_script_file output for
+        marker entries, only populated when the file actually contains
+        `<<<window>>>` markers), `orig_pcs`, `ctrl_lengths`, and
+        `source_snapshot` (always captured pre-write for window resolution).
+    """
+    mode: str  # "relocate" or "overflow"
+    # Relocate-mode payload:
+    entries: Optional[list] = None
+    source_snapshot: Optional[bytes] = None
+    # Overflow-mode payload:
+    auto_entries: Optional[list] = None
+    windowed: Optional[list] = None
+    orig_pcs: Optional[list] = None
+    ctrl_lengths: Optional[dict] = None
+    has_window_markers: bool = False
+
+
+@dataclass
 class WriteRange:
     offset: int
     length: int
@@ -92,14 +121,6 @@ def handle_bin(rom: bytearray, section: Section, root: Path, ctx: Optional[Build
     """Unified raw/compressed-bytes handler. Honors codec= and grow= (default 'replace')."""
     if section.offset is None:
         raise HandlerError(f"{section.source}: <bin> requires offset")
-    pre = getattr(section, "_prepared", None)
-    if pre is not None:
-        data = pre
-        grow = (section.grow or "replace").lower()
-        if grow not in {"replace", "insert", "fail"}:
-            raise HandlerError(f"{section.source}: invalid grow={section.grow!r}")
-        return _write(rom, section.offset, data,
-                      allow_grow=(grow == "insert"), source=section.source or "")
     data = _read_concat(section, root)
 
     if section.codec:
@@ -128,51 +149,35 @@ def handle_bin(rom: bytearray, section: Section, root: Path, ctx: Optional[Build
     return _write(rom, section.offset, data, allow_grow=allow_grow, source=section.source or "")
 
 
-# Bitplane transforms. Map `encode` value → (forward, reverse) functions.
-# forward = source-file bytes → ROM bytes (build direction).
-# reverse = ROM bytes → source-file bytes (extract direction).
-# Currently only identity (`None`, `"raw"`, `"planar"`) is wired. Named
-# transformations like MBuild's "2bpp-to-1bpp-il" raise HandlerError pointing
-# to the roadmap; the bitplane registry is structured so a later phase can
-# drop in real conversions without touching the handler.
-_IDENTITY = lambda b: b
-_BITPLANE_TRANSFORMS: dict[str, tuple[Callable[[bytes], bytes], Callable[[bytes], bytes]]] = {
-    "": (_IDENTITY, _IDENTITY),
-    "raw": (_IDENTITY, _IDENTITY),
-    "planar": (_IDENTITY, _IDENTITY),
-}
-
-
 def handle_graphics(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
     """Tile/palette/tilemap data. Phase 3 wires raw planar passthrough; bitplane
     repacking (e.g. MBuild's "2bpp-to-1bpp-il") lands in a later phase."""
     if section.offset is None:
         raise HandlerError(f"{section.source}: <graphics> requires offset")
-    pre = getattr(section, "_prepared", None)
-    if pre is not None:
-        grow = (section.grow or "replace").lower()
-        return _write(rom, section.offset, pre,
-                      allow_grow=(grow == "insert"), source=section.source or "")
     data = _read_concat(section, root)
-    key = (section.codec or "").lower()
-    if key not in _BITPLANE_TRANSFORMS:
+    if not _is_identity_bitplane(section.codec):
         raise HandlerError(
             f"{section.source}: bitplane transform encode={section.codec!r} not yet "
-            f"implemented. Known: {sorted(_BITPLANE_TRANSFORMS)}"
+            f"implemented (only raw passthrough supported)"
         )
-    forward, _ = _BITPLANE_TRANSFORMS[key]
-    data = forward(data)
     grow = (section.grow or "replace").lower()
     allow_grow = grow == "insert"
     return _write(rom, section.offset, data, allow_grow=allow_grow, source=section.source or "")
 
 
+def _is_identity_bitplane(encode: Optional[str]) -> bool:
+    return (encode or "").lower() in {"", "raw", "planar"}
+
+
 def bitplane_reverse(encode: Optional[str]) -> Callable[[bytes], bytes]:
-    """Resolve the reverse-direction bitplane transform (used by extract)."""
-    key = (encode or "").lower()
-    if key not in _BITPLANE_TRANSFORMS:
+    """Resolve the reverse-direction bitplane transform (used by extract).
+
+    Only identity passthrough is wired today; named transforms (e.g. MBuild's
+    "2bpp-to-1bpp-il") raise until implemented.
+    """
+    if not _is_identity_bitplane(encode):
         raise HandlerError(f"bitplane transform encode={encode!r} not yet implemented")
-    return _BITPLANE_TRANSFORMS[key][1]
+    return lambda b: b
 
 
 def handle_project(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
@@ -405,9 +410,78 @@ def _script_placement_mode(section: Section, root: Path) -> str:
     )
 
 
+def _script_prepare_relocate(
+    rom_snapshot: bytes, section: Section, root: Path,
+) -> _PreparedScript:
+    """Worker-side encode for a relocate-mode <script> section.
+
+    Pure: reads `script_path` + `table_path` + (optionally) a snapshot of
+    `rom` for `slot-measure="source-entry"`. No allocator, no labels.
+    Returns a `_PreparedScript` consumed by `handle_script()` in the apply
+    phase."""
+    from retrotool.script.encode import encode_script_file  # deferred
+
+    script_path = _resolve(Path(str(section.files[0])), root)
+    table_path = _resolve(Path(str(section.table)), root)
+    fallback_path = (
+        _resolve(Path(str(section.fallback_table)), root)
+        if section.fallback_table else None
+    )
+
+    entries = encode_script_file(
+        script_path, table_path,
+        fallback_table=fallback_path,
+        word_wrap=section.word_wrap,
+        textbuf_limit=section.textbuf_limit,
+        sub_table_filter=section.pointer_table,
+    )
+    count = int(section.count) if section.count is not None else 0
+    while len(entries) < count:
+        entries.append((b"\x00", None, [], {}, False))
+    entries = entries[:count]
+
+    # Snapshot for slot_measure="source-entry": the slot's effective end is
+    # measured by walking the source bytes ctrl-aware, not by next-ptr
+    # distance. Snapshot must reflect the rom AS OF prepare time so the
+    # source bytes seen here match what the serial path saw before any
+    # overlapping section's writes.
+    source_snapshot: Optional[bytes] = None
+    if section.overflow is not None and (
+        str(section.overflow.get("slot-measure") or "").strip()
+        == "source-entry"
+    ):
+        source_snapshot = bytes(rom_snapshot)
+
+    return _PreparedScript(
+        mode="relocate",
+        entries=entries,
+        source_snapshot=source_snapshot,
+    )
+
+
+def script_prepare(
+    rom_snapshot: bytes, section: Section, root: Path,
+) -> Optional[_PreparedScript]:
+    """Driver-facing: run the worker-eligible encode phase for a script
+    section. Returns None for paths that aren't worth (or safe to) parallelize
+    (legacy concat mode, missing pointer-table). The caller should fall back
+    to running `handle_script` serially when None is returned."""
+    if section.table is None or not section.files:
+        return None
+    mode = _script_placement_mode(section, root)
+    if mode == "overflow":
+        return _script_prepare_overflow(rom_snapshot, section, root)
+    # Relocate mode requires pointer-table + count; legacy concat mode is
+    # serial-only.
+    if section.pointer_table is None or section.count is None:
+        return None
+    return _script_prepare_relocate(rom_snapshot, section, root)
+
+
 def handle_script(
     rom: bytearray, section: Section, root: Path,
     ctx: Optional[BuildContext] = None,
+    prepared: Optional[_PreparedScript] = None,
 ) -> list[WriteRange]:
     """Pointer-table-driven script insertion.
 
@@ -422,6 +496,10 @@ def handle_script(
       block in the source file, patch an FFC0 redirect at the window's
       source offset and write the encoded text + FFC0-return tail into
       `ctx.allocator` freespace. Delegates to `_handle_script_windowed`.
+
+    `prepared` is the optional output of `script_prepare()` run in a worker
+    thread — when supplied, the encode phase is skipped and we go straight to
+    placement. When None, the encode phase runs inline (serial path).
     """
     if section.table is None:
         raise HandlerError(f"{section.source}: <script> requires table=")
@@ -429,7 +507,7 @@ def handle_script(
         raise HandlerError(f"{section.source}: <script> requires file=")
 
     if _script_placement_mode(section, root) == "overflow":
-        return _handle_script_windowed(rom, section, root, ctx)
+        return _handle_script_windowed(rom, section, root, ctx, prepared=prepared)
     # Legacy mode: no pointer-table, just concatenate Table.encode_text(line)
     # joined with $00. Kept so pre-phase-6 specs keep working.
     if section.pointer_table is None:
@@ -450,32 +528,23 @@ def handle_script(
     if section.count is None:
         raise HandlerError(f"{section.source}: <script> requires count=")
 
-    from retrotool.script.encode import encode_script_file  # deferred import
-
     ptr_size = section.pointer_size or 2
     if ptr_size not in (2, 3):
         raise HandlerError(
             f"{section.source}: pointer-size must be 2 or 3, got {ptr_size}"
         )
 
-    script_path = _resolve(Path(str(section.files[0])), root)
-    table_path = _resolve(Path(str(section.table)), root)
-    fallback_path = (
-        _resolve(Path(str(section.fallback_table)), root)
-        if section.fallback_table else None
-    )
-
-    entries = encode_script_file(
-        script_path, table_path,
-        fallback_table=fallback_path,
-        word_wrap=section.word_wrap,
-        textbuf_limit=section.textbuf_limit,
-        sub_table_filter=section.pointer_table,
-    )
+    if prepared is None:
+        prepared = _script_prepare_relocate(bytes(rom), section, root)
+    if prepared.mode != "relocate" or prepared.entries is None:
+        raise HandlerError(
+            f"{section.source}: prepared payload mode mismatch "
+            f"(expected relocate, got {prepared.mode!r})"
+        )
+    entries = prepared.entries
     count = int(section.count)
-    while len(entries) < count:
-        entries.append((b"\x00", None, [], {}, False))
-    entries = entries[:count]
+
+    table_path = _resolve(Path(str(section.table)), root)
 
     ptr_tbl_pc = section.pointer_table
     ptr_tbl_len = count * ptr_size
@@ -514,10 +583,11 @@ def handle_script(
                     f"'pointer-distance' or 'source-entry', got {slot_measure!r}"
                 )
     # Snapshot source ROM data region for `source-entry` slot measurement.
-    # Captured before any writes so EN entries whose original JP bytes were
-    # shorter than the pointer slot still overflow matching LM3 semantics.
-    _source_snapshot: Optional[bytes] = None
-    if slot_measure == "source-entry":
+    # Captured during `_script_prepare_relocate` against the rom-as-of-prepare
+    # (so worker scratch matches what serial would have observed); fallback
+    # for legacy callers passing prepared without a snapshot.
+    _source_snapshot: Optional[bytes] = prepared.source_snapshot
+    if slot_measure == "source-entry" and _source_snapshot is None:
         _source_snapshot = bytes(rom)
     # Pointer-encoder applied to `[HHHH@N[:label]]` and `[HHHH@@name]` fixup
     # resolution. Defaults to SNES LoROM1 24-bit LE to match the encoder's
@@ -964,9 +1034,86 @@ def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Opti
                   allow_grow=allow_grow, source=section.source or "")
 
 
+def _script_prepare_overflow(
+    rom_snapshot: bytes, section: Section, root: Path,
+) -> _PreparedScript:
+    """Worker-side encode for an overflow-mode <script> section.
+
+    Pure: reads script + table + (optionally) windowed-marker payload, plus a
+    snapshot of the ptr table so `orig_pcs` can be resolved without touching
+    the live rom in apply phase. No allocator, no labels."""
+    from retrotool.script.encode import (
+        encode_script_file,
+        encode_windowed_script_file,
+        _read_script_text as _read_text,
+    )
+    from retrotool.script.table import Table as _WinTable
+    from retrotool.core.address import SFCAddress, SFCAddressType
+
+    if section.pointer_table is None or section.count is None:
+        # Apply phase will surface the missing-attr error.
+        return _PreparedScript(mode="overflow")
+
+    script_path = _resolve(Path(str(section.files[0])), root)
+    table_path = _resolve(Path(str(section.table)), root)
+    fallback_path = (
+        _resolve(Path(str(section.fallback_table)), root)
+        if section.fallback_table else None
+    )
+
+    tbl = _WinTable(str(table_path))
+    ctrl_lengths = tbl.ctrl_lengths
+
+    # Original pointers — 2-byte, bank implicit from ptr_tbl_pc's bank.
+    count = int(section.count)
+    ptr_tbl_pc = section.pointer_table
+    ptr_bank = SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
+    orig_pcs: list[int] = []
+    for i in range(count):
+        off = ptr_tbl_pc + i * 2
+        addr16 = rom_snapshot[off] | (rom_snapshot[off + 1] << 8)
+        snes = (ptr_bank << 16) | addr16
+        pc = SFCAddress(snes, SFCAddressType.LOROM1).get_address(SFCAddressType.PC)
+        orig_pcs.append(pc)
+
+    # Auto-window entries: always encode (covers both pure auto-window files
+    # and the non-marker entries in hybrid files; encode_script_file returns
+    # b'\x00' for entries containing `<<<window>>>` markers, so the apply
+    # phase naturally routes those to the windowed path via the skip set).
+    auto_entries = encode_script_file(
+        script_path, table_path,
+        fallback_table=fallback_path,
+        word_wrap=section.word_wrap,
+        textbuf_limit=section.textbuf_limit,
+        sub_table_filter=section.pointer_table,
+    )
+    while len(auto_entries) < count:
+        auto_entries.append((b"\x00", None, [], {}, False))
+    auto_entries = auto_entries[:count]
+
+    file_text = _read_text(script_path)
+    has_window_markers = '<<<window' in file_text
+    windowed = None
+    if has_window_markers:
+        windowed = encode_windowed_script_file(
+            script_path, table_path, fallback_table=fallback_path,
+        )
+
+    return _PreparedScript(
+        mode="overflow",
+        auto_entries=auto_entries,
+        windowed=windowed,
+        orig_pcs=orig_pcs,
+        ctrl_lengths=ctrl_lengths,
+        source_snapshot=bytes(rom_snapshot),
+        has_window_markers=has_window_markers,
+    )
+
+
 def _handle_script_windowed(
     rom: bytearray, section: Section, root: Path,
     ctx: Optional[BuildContext] = None,
+    prepared: Optional[_PreparedScript] = None,
 ) -> list[WriteRange]:
     """`script` handler path for `placement.mode = "overflow"`.
 
@@ -974,6 +1121,9 @@ def _handle_script_windowed(
     redirect at the window's source offset and write the encoded EN text +
     FFC0-return tail into freespace via `ctx.allocator`. Pointer table stays
     untouched — windows patch inside existing entry bytecodes.
+
+    `prepared` is the optional output of `script_prepare()` from a worker
+    thread — when supplied, the encode phase is skipped.
     """
     if section.pointer_table is None or section.count is None:
         raise HandlerError(
@@ -986,9 +1136,6 @@ def _handle_script_windowed(
             f"[rom.build].freespace for overflow allocation"
         )
 
-    from retrotool.script.encode import encode_windowed_script_file
-    from retrotool.script.table import Table as _WinTable
-    from retrotool.core.address import SFCAddress, SFCAddressType
     from retrotool.build.overflow import get_pointer_encoder
 
     ptr_size = section.pointer_size or 2
@@ -1005,23 +1152,17 @@ def _handle_script_windowed(
         if section.fallback_table else None
     )
 
-    # Source ROM snapshot — ptr table + window content must be read before any
-    # writes in case an earlier section mutated the region.
-    source_snapshot = bytes(rom)
-    tbl = _WinTable(str(table_path))
-    ctrl_lengths = tbl.ctrl_lengths
-
-    # Read original pointers (2-byte, bank implicit from ptr_tbl_pos's bank).
+    if prepared is None:
+        prepared = _script_prepare_overflow(bytes(rom), section, root)
+    if prepared.mode != "overflow" or prepared.auto_entries is None:
+        raise HandlerError(
+            f"{section.source}: prepared payload mode mismatch "
+            f"(expected overflow, got {prepared.mode!r})"
+        )
+    source_snapshot = prepared.source_snapshot or bytes(rom)
+    orig_pcs = prepared.orig_pcs or []
+    ctrl_lengths = prepared.ctrl_lengths or {}
     count = int(section.count)
-    ptr_tbl_pc = section.pointer_table
-    ptr_bank = SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
-    orig_pcs: list[int] = []
-    for i in range(count):
-        off = ptr_tbl_pc + i * 2
-        addr16 = source_snapshot[off] | (source_snapshot[off + 1] << 8)
-        snes = (ptr_bank << 16) | addr16
-        pc = SFCAddress(snes, SFCAddressType.LOROM1).get_address(SFCAddressType.PC)
-        orig_pcs.append(pc)
 
     # Forward encoder (inline stub → tail in $C6 freespace): lorom1 ($80+).
     forward_encoder: Callable[[int], bytes] = _pc_to_lorom1_bytes
@@ -1036,42 +1177,34 @@ def _handle_script_windowed(
             return_encoder = get_pointer_encoder(str(ret_name))
 
     # Dispatch by file format. Files with explicit `<<<window[N]:$S-$E>>>`
-    # blocks use the per-window FFC0 patcher (mid-entry text inside bytecode
-    # streams). Plain `<<$BANK:N [$ADDR]>>` files use auto-window mode: each
-    # entry is treated as a whole-entry window — write inline if it fits the
-    # source slot (next entry's PC), else FFC0-redirect the entire entry to
-    # freespace. Pointer table stays untouched in both modes.
-    from retrotool.script.encode import _read_script_text as _read_text
-    file_text = _read_text(script_path)
+    # blocks take the hybrid path (auto-window for non-marker entries +
+    # per-window FFC0 patcher for marker entries). Plain `<<$BANK:N>>` files
+    # take the pure auto-window path. Pointer table stays untouched in both.
     if os.environ.get('RT_DEBUG_AUTO_WIN_ALL'):
-        print(f"[dispatch] {section.source}: windowed={'<<<window' in file_text} path={script_path}")
-    if '<<<window' in file_text:
-        # Hybrid: entries without `<<<window>>>` markers take auto-window path
-        # (whole-slot inline/FFC0). Marker entries take per-window FFC0 path.
-        # encode_script_file returns b'\x00' for entries with markers
-        # (line 380-382 of encode.py), so they're naturally skipped by
-        # auto-window when we pass a skip set.
-        from retrotool.script.encode import encode_windowed_script_file as _ewsf
-        _windowed_probe = _ewsf(script_path, table_path, fallback_table=fallback_path)
+        print(f"[dispatch] {section.source}: windowed={prepared.has_window_markers} path={script_path}")
+    if prepared.has_window_markers:
         windowed_idx_set = {
-            i for i, w in enumerate(_windowed_probe) if w is not None
+            i for i, w in enumerate(prepared.windowed or []) if w is not None
         }
         writes_a = _emit_auto_window_writes(
             rom, section, ctx, source_snapshot, orig_pcs, count,
             script_path, table_path, fallback_path, forward_encoder,
             skip_indices=windowed_idx_set,
             ctrl_lengths=ctrl_lengths,
+            entries=prepared.auto_entries,
         )
         writes_b = _emit_windowed_marker_writes(
             rom, section, ctx, source_snapshot, ctrl_lengths,
             orig_pcs, count, script_path, table_path, fallback_path,
             forward_encoder, return_encoder,
+            windowed=prepared.windowed,
         )
         return writes_a + writes_b
     return _emit_auto_window_writes(
         rom, section, ctx, source_snapshot, orig_pcs, count,
         script_path, table_path, fallback_path, forward_encoder,
         ctrl_lengths=ctrl_lengths,
+        entries=prepared.auto_entries,
     )
 
 
@@ -1079,35 +1212,61 @@ def _emit_windowed_marker_writes(
     rom, section, ctx, source_snapshot, ctrl_lengths,
     orig_pcs, count, script_path, table_path, fallback_path,
     forward_encoder, return_encoder,
+    windowed: Optional[list] = None,
 ) -> list[WriteRange]:
-    """Per-window FFC0 patches for files with explicit `<<<window>>>` blocks."""
-    from retrotool.script.encode import encode_windowed_script_file
-    windowed = encode_windowed_script_file(
-        script_path, table_path, fallback_table=fallback_path,
-    )
+    """Per-window FFC0 patches for files with explicit `<<<window>>>` blocks.
+
+    `windowed` is the precomputed `encode_windowed_script_file` output (from
+    `_script_prepare_overflow`); when None we encode inline."""
+    if windowed is None:
+        from retrotool.script.encode import encode_windowed_script_file
+        windowed = encode_windowed_script_file(
+            script_path, table_path, fallback_table=fallback_path,
+        )
 
     _rtd = os.environ.get('RT_DEBUG_AUTO_WIN')
     _dbg = _rtd and (_rtd == section.source or _rtd in str(section.source))
     writes: list[WriteRange] = []
+    # Per-entry clobber override from `[display].clobber_lead_entries` in
+    # the DataDef TOML. Default (entry not listed) = preserve byte at $START
+    # (FFC0 stub lands at $START+1, legacy behavior). Listed entries flip
+    # to clobber-mode for ALL windows of that entry: FFC0 stub at $START.
+    clobber_set = set(getattr(section, 'clobber_lead_entries', None) or [])
     if _dbg:
-        print(f"[windowed] {section.source}: {len(windowed)} entries total")
+        print(f"[windowed] {section.source}: {len(windowed)} entries total"
+              f"{f', clobber={sorted(clobber_set)}' if clobber_set else ''}")
     for i, entry_windows in enumerate(windowed):
         if entry_windows is None or i >= count:
             if _dbg and entry_windows is not None:
                 print(f"  [windowed] entry {i}: skipped (i>=count={count})")
             continue
         entry_pc = orig_pcs[i]
+        # preserve_lead is the default (legacy) behavior; flip to clobber
+        # for this whole entry if its index is in the TOML override list.
+        preserve_lead = (i not in clobber_set)
         if _dbg:
-            print(f"  [windowed] entry {i}: slot_pc=0x{entry_pc:06X}, {len(entry_windows)} windows")
-        for start, end, encoded_text in entry_windows:
+            print(f"  [windowed] entry {i}: slot_pc=0x{entry_pc:06X}, "
+                  f"{len(entry_windows)} windows, preserve_lead={preserve_lead}")
+        for win_tuple in entry_windows:
+            # Encoder emits 3-tuples (legacy) or 4-tuples (forward-compat).
+            if len(win_tuple) == 4:
+                start, end, encoded_text, _legacy_flag = win_tuple
+            else:
+                start, end, encoded_text = win_tuple
             if not encoded_text:
                 if _dbg: print(f"    win ${start:04X}-${end:04X}: empty encoded_text skip")
                 continue
+            # FFC0 stub is 5 bytes. With preserve_lead=True it lands at
+            # $start+1 (byte at $start kept as original ROM data) — needs
+            # window_size >= 6. With preserve_lead=False it lands at $start
+            # (clobbers byte at $start) — needs window_size >= 5.
+            stub_offset = 1 if preserve_lead else 0
+            min_window_size = 6 if preserve_lead else 5
             window_size = end - start
             absorbed_suffix = b''
             # Small-window absorption: extend the window into the trailing
             # [end] or a safe (non-FFC0/FFF0) FF-ctrl code so FFC0 has space.
-            if window_size < 6:
+            if window_size < min_window_size:
                 end_byte = source_snapshot[entry_pc + end]
                 if end_byte == 0x00:
                     absorbed_suffix = b'\x00'
@@ -1122,20 +1281,22 @@ def _emit_windowed_marker_writes(
                         )
                         end += cmd_len
                         window_size = end - start
-                if window_size < 6:
+                if window_size < min_window_size:
                     continue
 
             # Skip no-op rewrites (encoded identical to source window bytes).
+            # Comparison range starts at $start+stub_offset since that's the
+            # first byte the stub will clobber.
             orig_end = end - len(absorbed_suffix)
-            orig_text = bytes(source_snapshot[entry_pc + start + 1:entry_pc + orig_end])
+            orig_text = bytes(source_snapshot[entry_pc + start + stub_offset:entry_pc + orig_end])
             if _dbg:
-                print(f"    win ${start:04X}-${end:04X} size={window_size} enc={encoded_text[:16].hex()}({len(encoded_text)}b) orig={orig_text[:16].hex()}({len(orig_text)}b)")
+                print(f"    win ${start:04X}-${end:04X} size={window_size} preserve={preserve_lead} enc={encoded_text[:16].hex()}({len(encoded_text)}b) orig={orig_text[:16].hex()}({len(orig_text)}b)")
             if encoded_text == orig_text:
                 if _dbg: print(f"      → no-op skip")
                 continue
 
-            # Inline FFC0 stub at $start+1 (byte at $start stays in ROM).
-            ffc0_pc = entry_pc + start + 1
+            # Inline FFC0 stub at $start (default) or $start+1 (preserve mode).
+            ffc0_pc = entry_pc + start + stub_offset
             _ensure_room(rom, ffc0_pc + 5)
             rom[ffc0_pc:ffc0_pc + 5] = b'\xFF\xC0\xFF\xFF\xFF'
             writes.append(WriteRange(offset=ffc0_pc, length=5))
@@ -1162,6 +1323,7 @@ def _emit_auto_window_writes(
     script_path, table_path, fallback_path, forward_encoder,
     skip_indices: Optional[set[int]] = None,
     ctrl_lengths: Optional[dict[int, int]] = None,
+    entries: Optional[list] = None,
 ) -> list[WriteRange]:
     """Universal in-place + FFC0 overflow for plain `<<$BANK:N>>` files.
 
@@ -1171,19 +1333,22 @@ def _emit_auto_window_writes(
     full encoded text written to `ctx.allocator` freespace. The pointer
     table is never rewritten — sibling tables sharing the data region
     (e.g. dialog-1..5) keep their references valid.
-    """
-    from retrotool.script.encode import encode_script_file
 
-    entries = encode_script_file(
-        script_path, table_path,
-        fallback_table=fallback_path,
-        word_wrap=section.word_wrap,
-        textbuf_limit=section.textbuf_limit,
-        sub_table_filter=section.pointer_table,
-    )
-    while len(entries) < count:
-        entries.append((b"\x00", None, [], {}, False))
-    entries = entries[:count]
+    `entries` is the precomputed `encode_script_file` output (from
+    `_script_prepare_overflow`); when None we encode inline.
+    """
+    if entries is None:
+        from retrotool.script.encode import encode_script_file
+        entries = encode_script_file(
+            script_path, table_path,
+            fallback_table=fallback_path,
+            word_wrap=section.word_wrap,
+            textbuf_limit=section.textbuf_limit,
+            sub_table_filter=section.pointer_table,
+        )
+        while len(entries) < count:
+            entries.append((b"\x00", None, [], {}, False))
+        entries = entries[:count]
 
     # Per-entry slot end = nearest strictly-greater original PC across all
     # entries. Handles non-monotonic / duplicate ptrs that share bodies.

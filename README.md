@@ -433,14 +433,26 @@ Text emitters for common downstream formats. Pure stdlib — no Godot/Tiled inst
 - `export.python.render_module` — `@dataclass` module.
 
 ### `retrotool.ai`
-LLM-assisted reverse-engineering scaffolding.
+Prompt templates and dataclass shapes for **external** LLM-driven scripts. **No model calls
+are made from this package** — it is a vocabulary, not a client. Designed so a downstream
+script can do:
 
-- `prompts.*` — templates for compression identification, text-table location, level-format
-  discovery, asar hook generation.
-- `workflows.*` — ordered `WorkflowStep[]` sequences.
-- `ipc_prompt.IpcPlan` — structured Mesen-IPC command sequence an LLM can fill in and a
-  `MesenClient` can consume directly.
-- `build_context(project, ...)` — project → prompt prelude.
+```python
+from retrotool.ai import IDENTIFY_COMPRESSION, build_context
+prompt = IDENTIFY_COMPRESSION.format(offset=0x10000, head=head_hex)
+prelude = build_context(project, ...).to_prompt()
+# ...send `prelude + prompt` to whichever LLM you wire up
+```
+
+- `prompts.*` — `str.format`-style templates: `IDENTIFY_COMPRESSION`, `LOCATE_TEXT_TABLE`,
+  `DISCOVER_LEVEL_FORMAT`, `SUGGEST_ASAR_HOOK`.
+- `workflows.*` — `WorkflowStep` dataclass + two canned step lists
+  (`IDENTIFY_COMPRESSION_WORKFLOW`, `DISCOVER_TEXT_SYSTEM_WORKFLOW`) external orchestrators
+  can iterate.
+- `ipc_prompt.IpcPlan` / `IpcStep` — structured Mesen-IPC command sequences (`.to_json()`)
+  that a `MesenClient` consumer can apply step-by-step.
+- `context.build_context(project, ...)` — `ProjectConfig` → `ProjectContext` with
+  `.to_prompt()` for the LLM prelude.
 
 ## MBXML builds
 

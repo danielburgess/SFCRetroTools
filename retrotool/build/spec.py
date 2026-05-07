@@ -35,7 +35,6 @@ class SectionKind(str, Enum):
     GRAPHICS = "graphics"
     SCRIPT = "script"
     PROJECT = "project"
-    ASARDEF = "asardef"
     LIBSFX = "libsfx"
     FIXED_RECORDS = "fixed-records"
     WINDOWED_SCRIPT = "windowed-script"
@@ -44,20 +43,9 @@ class SectionKind(str, Enum):
     def operation(self) -> str:
         last = self.value[-1]
         if self.value in ("bin", "asar", "graphics", "script", "project",
-                          "asardef", "libsfx", "fixed-records",
-                          "windowed-script"):
+                          "libsfx", "fixed-records", "windowed-script"):
             return OP_REPLACE  # default; actual behavior handler-specific
         return OP_INSERT if last == "i" else OP_REPLACE
-
-
-# MBuild 1.29 section tags we accept as-is.
-MBUILD_KINDS = frozenset({
-    SectionKind.REP, SectionKind.INS,
-    SectionKind.LZR, SectionKind.LZI,
-    SectionKind.RLR, SectionKind.RLI,
-    SectionKind.BPR, SectionKind.BPI,
-    SectionKind.SBR, SectionKind.SBI,
-})
 
 
 @dataclass
@@ -99,6 +87,11 @@ class Section:
     terminator: Optional[int] = None        # entry terminator byte (default 0x00)
     fallback_table: Optional[PurePosixPath] = None
     word_wrap: Optional[dict] = None        # {line_width, max_lines, entries}
+    # Per-entry override for windowed-script "preserve byte at $START". Empty
+    # = use legacy default (preserve byte at $START, FFC0 stub at $START+1).
+    # Listed entry indices flip to clobber-mode (FFC0 stub at $START, byte
+    # there overwritten). See BuildStep.clobber_lead_entries.
+    clobber_lead_entries: list = field(default_factory=list)
     textbuf_limit: Optional[int] = None
     overflow: Optional[dict] = None         # {strategy, marker, splitter, ...}
     # Placement mode: "overflow" = in-place patch + window redirects (ptr
@@ -117,9 +110,6 @@ class Section:
     # Set when the parser auto-migrated a MBuild 1.29 legacy element
     # (e.g. <lzr> → kind=BIN, original_kind=LZR). None for native-form sections.
     original_kind: Optional["SectionKind"] = None
-    # Transient: bytes populated by `parallel_prepare` for eligible kinds; the
-    # serial handler path checks this before re-encoding. Not compared or repr'd.
-    _prepared: Optional[bytes] = field(default=None, repr=False, compare=False)
 
 
 @dataclass

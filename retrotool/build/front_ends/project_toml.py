@@ -133,10 +133,6 @@ def _coerce_files(v: Any, field: str) -> list[PurePosixPath]:
 
 # ---- main -----------------------------------------------------------------
 
-_BUILD_SCALAR_FIELDS = {
-    "original", "name", "version", "revision", "path", "diff",
-}
-
 
 def parse_project_toml(
     path: Path | str,

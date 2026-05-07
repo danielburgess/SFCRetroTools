@@ -1,4 +1,7 @@
-"""Build LLM-ready context from current project state."""
+"""ProjectConfig → ProjectContext shape for use as an LLM prompt prelude.
+
+Pure data transform. External callers send `ProjectContext.to_prompt()` to their model.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

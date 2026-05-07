@@ -16,8 +16,10 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -216,7 +218,10 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
             print(f"diff:      {d.format} skipped — {d.note}")
         else:
             print(f"diff:      {d.format} → {d.path} ({d.size} bytes)")
+    workers = os.cpu_count() if args.jobs is None else max(1, args.jobs)
+    print(f"workers:   {workers}{' (serial)' if workers == 1 else ''}")
     print(f"duration:  {result.duration_ms} ms")
+    print(f"finished:  {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
     return 0
 
 

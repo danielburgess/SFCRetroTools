@@ -96,10 +96,6 @@ SECTION_ATTRS: dict[SectionKind, AttrSpec] = {
         required=frozenset({"src"}),
         optional=frozenset(),
     ),
-    SectionKind.ASARDEF: AttrSpec(
-        required=frozenset({"file"}),
-        optional=frozenset({"datadef"}),
-    ),
     SectionKind.LIBSFX: AttrSpec(
         required=frozenset({"src"}),
         optional=frozenset({"debug", "out", "stack-size"}),
