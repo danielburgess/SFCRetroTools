@@ -468,8 +468,12 @@ def build(
 
     `parallel` controls the gather-phase ThreadPoolExecutor used for
     parallel-eligible section kinds (`_PARALLEL_KINDS`):
-      * `None` (default) → `os.cpu_count()` workers.
-      * `1` → fully serial (no thread pool created; useful for debugging).
+      * `None` (default) → fully serial (1 worker, no pool created). After
+        the M0.5-M0.8 Python-side optimizations, build times for typical
+        SFC projects are sub-second and parallel coordination overhead
+        slightly exceeds the gain. Opt in to parallel when warranted.
+      * `0` → `os.cpu_count()` workers (auto).
+      * `1` → fully serial (explicit; equivalent to `None`).
       * `N>1` → cap workers at `N`.
     Determinism is preserved regardless: writes are applied in declared
     section order against the single working ROM, so output bytes are
@@ -584,9 +588,15 @@ def build(
     # then runs against the post-drain rom, matching legacy ordering.
     futures: dict[int, Future[_GatherResult]] = {}
     pool: Optional[ThreadPoolExecutor] = None
-    max_workers = (
-        os.cpu_count() if parallel is None else max(1, parallel)
-    )
+    # Resolution: None → serial (1). 0 → cpu_count (auto). N>0 → N workers.
+    # Default-serial reflects post-optimization reality: at sub-second build
+    # times the worker-coordination overhead exceeds the parallel gain.
+    if parallel is None:
+        max_workers = 1
+    elif parallel == 0:
+        max_workers = os.cpu_count() or 1
+    else:
+        max_workers = max(1, parallel)
     if max_workers and max_workers > 1:
         pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="retrotool-gather",

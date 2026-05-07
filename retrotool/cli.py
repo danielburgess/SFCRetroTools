@@ -192,6 +192,10 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
         name = spec.name or spec_file.stem
         out = source_root / f"{name}.sfc"
     cache = None if args.no_cache else BuildCache(source_root / ".cache")
+    # CLI `-j` wins; otherwise consult spec.jobs from project.toml/MBXML;
+    # otherwise leave None and let the driver pick its default (serial).
+    # `0` (CLI or spec) means "auto" → os.cpu_count().
+    resolved_jobs = args.jobs if args.jobs is not None else spec.jobs
     # Pick a reporter: TTY → animated braille spinner; else line-per-event log.
     # `--no-progress` forces silent (None reporter — build runs without UI).
     if args.no_progress:
@@ -205,7 +209,7 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
         result = build(
             spec, source_root=source_root, out_path=out, cache=cache,
             only=_split_csv(args.only), skip=_split_csv(args.skip),
-            parallel=args.jobs, reporter=reporter,
+            parallel=resolved_jobs, reporter=reporter,
         )
     print(f"rom:       {result.rom_path}")
     print(f"size:      {result.rom_size} bytes")
@@ -218,7 +222,12 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
             print(f"diff:      {d.format} skipped — {d.note}")
         else:
             print(f"diff:      {d.format} → {d.path} ({d.size} bytes)")
-    workers = os.cpu_count() if args.jobs is None else max(1, args.jobs)
+    if resolved_jobs is None:
+        workers = 1
+    elif resolved_jobs == 0:
+        workers = os.cpu_count() or 1
+    else:
+        workers = max(1, resolved_jobs)
     print(f"workers:   {workers}{' (serial)' if workers == 1 else ''}")
     print(f"duration:  {result.duration_ms} ms")
     print(f"finished:  {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
@@ -357,8 +366,11 @@ def _build_parser() -> argparse.ArgumentParser:
     bb.add_argument("--skip", default=None,
                     help="comma-separated section kinds OR names to skip")
     bb.add_argument("-j", "--jobs", type=int, default=None,
-                    help="gather-phase worker thread count "
-                         "(default: os.cpu_count(); 1 = fully serial)")
+                    help="gather-phase worker thread count. Default: 1 "
+                         "(serial) — overridable via [rom.build].jobs in "
+                         "project.toml or jobs= on <build> in MBXML. "
+                         "Pass 0 for os.cpu_count() (auto). CLI value wins "
+                         "over spec value.")
     bb.add_argument("--progress", dest="progress", action="store_true",
                     default=None,
                     help="force the animated braille progress reporter even "

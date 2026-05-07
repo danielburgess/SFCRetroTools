@@ -10,7 +10,7 @@ from retrotool.build.spec import SectionKind
 # Attributes on <build> root.
 BUILD_ATTRS = frozenset({
     "original", "name", "version", "revision", "revbyteloc",
-    "path", "pad", "diff",
+    "path", "pad", "diff", "jobs",
 })
 
 

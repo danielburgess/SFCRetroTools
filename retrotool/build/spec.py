@@ -177,6 +177,11 @@ class BuildSpec:
     # redundant to archive). Default True — safe-by-default for iterative
     # playtest runs that might have accumulated state.
     archive_sram: bool = True
+    # Default gather-phase worker count for `retrotool build`. Picked up by
+    # the CLI when `-j/--jobs` is not passed. `None` → use the global
+    # default (currently 1, serial). `0` is interpreted as "auto" and
+    # resolves to os.cpu_count() at run time. CLI `-j` always wins.
+    jobs: Optional[int] = None
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)

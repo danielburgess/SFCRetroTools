@@ -112,6 +112,19 @@ def _parse_int(v: Optional[str]) -> Optional[int]:
     return int(s)
 
 
+def _parse_jobs(v: Optional[str]) -> Optional[int]:
+    """Parse a jobs= attribute. None → None; "auto" → 0; non-negative int
+    → int. 0 resolves to os.cpu_count() at run time."""
+    if v is None:
+        return None
+    if v.strip().lower() == "auto":
+        return 0
+    n = _parse_int(v)
+    if n is None or n < 0:
+        raise SchemaError(f"<build> jobs= must be a non-negative int or 'auto', got {v!r}")
+    return n
+
+
 def _norm_path(v: str) -> PurePosixPath:
     return PurePosixPath(v.replace("\\", "/"))
 
@@ -237,6 +250,7 @@ def _build_from_root(
         diff=attrs.get("diff"),
         source_path=PurePosixPath(source_path.as_posix()),
         vars=vars,
+        jobs=_parse_jobs(attrs.get("jobs")),
     )
 
     for child in root:

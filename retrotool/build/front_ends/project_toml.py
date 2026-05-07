@@ -94,6 +94,22 @@ _TRUTHY_STR = {"true", "1", "yes", "on"}
 _FALSY_STR = {"false", "0", "no", "off"}
 
 
+def _coerce_jobs(v: Any, field: str) -> Optional[int]:
+    """Coerce a jobs= value. None → None (use default). String "auto" or
+    integer 0 → 0 (resolves to os.cpu_count() at run time). Positive int →
+    int. Negative or non-int → SchemaError."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip().lower() == "auto":
+        return 0
+    if isinstance(v, bool):
+        raise SchemaError(f"{field}: expected int or 'auto', got bool")
+    n = _coerce_int(v, field)
+    if n is None or n < 0:
+        raise SchemaError(f"{field}: must be a non-negative int or 'auto', got {v!r}")
+    return n
+
+
 def _coerce_tristate_bool(v: Any, field: str) -> Optional[bool]:
     """None/missing → None; bool → bool; truthy/falsy str or int → bool.
     Used for attrs where absence must be distinguishable from explicit false."""
@@ -235,6 +251,7 @@ def parse_project_toml_dict(
         diff=mb.get("diff"),
         source_path=PurePosixPath(source_path.as_posix()) if source_path else None,
         vars=vars,
+        jobs=_coerce_jobs(mb.get("jobs"), "[rom.build].jobs"),
     )
 
     fs = mb.get("freespace", [])
