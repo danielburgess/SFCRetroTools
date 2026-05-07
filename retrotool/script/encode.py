@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-from retrotool.script.table import Table
+from retrotool.script.table import Table, load_table
 
 
 _BRACKET_TOKEN_RE = re.compile(r'\[[^\]]*\]|\{[0-9A-Fa-f]{2}\}')
@@ -92,8 +92,15 @@ def encode_text(
     else:
         fb_bytes = {}
 
-    max_key_len = max((len(k) for k in char_bytes), default=1)
-    fb_max_key_len = max((len(k) for k in fb_bytes), default=1) if fb_bytes else 1
+    max_key_len = getattr(table, 'max_key_len', None)
+    if max_key_len is None:
+        max_key_len = max((len(k) for k in char_bytes), default=1)
+    if fallback_table is not None:
+        fb_max_key_len = getattr(fallback_table, 'max_key_len', None)
+        if fb_max_key_len is None:
+            fb_max_key_len = max((len(k) for k in fb_bytes), default=1) if fb_bytes else 1
+    else:
+        fb_max_key_len = 1
 
     result = bytearray()
     fixups: list[ScriptFixup] = []
@@ -383,8 +390,8 @@ def encode_script_file(
     still fires in parity with other oversized entries. Entries are emitted in
     header-index order; gaps fill with `b'\\x00'`.
     """
-    tbl = Table(str(table_filename))
-    fb_tbl = Table(str(fallback_table)) if fallback_table else None
+    tbl = load_table(str(table_filename))
+    fb_tbl = load_table(str(fallback_table)) if fallback_table else None
 
     text = _read_script_text(Path(script_file))
     raw_entries = text.split('<<')[1:]
@@ -496,8 +503,8 @@ def encode_windowed_script_file(
     any trailing ``0x00`` terminator — the redirect back into original ROM
     already lands on the source [end] byte.
     """
-    tbl = Table(str(table_filename))
-    fb_tbl = Table(str(fallback_table)) if fallback_table else None
+    tbl = load_table(str(table_filename))
+    fb_tbl = load_table(str(fallback_table)) if fallback_table else None
     text = _read_script_text(Path(script_file))
 
     parts = _WINDOW_ENTRY_HEADER_RE.split(text)

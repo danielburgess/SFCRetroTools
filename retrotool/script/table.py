@@ -1,9 +1,50 @@
 """Table file codec. .tbl format: `HH=char` lines, `**` variable substitution."""
 from __future__ import annotations
 
+import os
+import threading
 from math import log
 from pathlib import Path
 from typing import Optional, Union
+
+
+_TABLE_CACHE: dict[tuple[str, int, int], "Table"] = {}
+_TABLE_CACHE_LOCK = threading.Lock()
+
+# Pre-computed two-digit uppercase hex strings 00..FF — used to expand
+# `**`/`%%` wildcards in .tbl files without per-iteration f-string format.
+_HEX2 = tuple(f'{i:02X}' for i in range(0x100))
+
+
+def load_table(
+    table_file: Union[str, Path],
+    warn_duplicates: bool = False,
+) -> "Table":
+    """Process-wide cached Table loader keyed by (abspath, mtime_ns, size).
+
+    Tables are immutable after construction, so a single instance can be
+    shared across threads/sections. Stat is cheap; full parse is not (65k+
+    entry wildcard expansion). Bypasses the cache when warn_duplicates is
+    set so repeated calls still emit warnings.
+    """
+    if warn_duplicates:
+        return Table(table_file, warn_duplicates=True)
+    abs_path = os.path.abspath(os.fspath(table_file))
+    try:
+        st = os.stat(abs_path)
+    except OSError:
+        return Table(table_file)
+    key = (abs_path, st.st_mtime_ns, st.st_size)
+    cached = _TABLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _TABLE_CACHE_LOCK:
+        cached = _TABLE_CACHE.get(key)
+        if cached is not None:
+            return cached
+        tbl = Table(table_file)
+        _TABLE_CACHE[key] = tbl
+        return tbl
 
 
 class Table:
@@ -21,6 +62,7 @@ class Table:
         self.__parsed_lines = cnt
         self.__file_name = table_file
         self.__encoding = enc
+        self.__max_key_len = max((len(k) for k in char_bytes), default=1)
         if warn_duplicates:
             self._check_duplicates()
 
@@ -108,18 +150,9 @@ class Table:
                         val, ch = parts
                         ch = ch.replace('\n', '').replace('\r', '').replace('\\n', '\n')
                         if '**' in val:
-                            for d in range(0x100):
-                                prep_ch = ch.replace('**', self.hex(d))
-                                prep_val = val.replace('**', self.hex(d))
-                                if '%%' in val:
-                                    for e in range(0x100):
-                                        self._set_maps(
-                                            prep_val.replace('%%', self.hex(e)),
-                                            prep_ch.replace('%%', self.hex(e)),
-                                            val_map, char_map, char_bytes,
-                                        )
-                                else:
-                                    self._set_maps(prep_val, prep_ch, val_map, char_map, char_bytes)
+                            self._expand_wildcards(
+                                val, ch, val_map, char_map, char_bytes,
+                            )
                         else:
                             self._set_maps(val, ch, val_map, char_map, char_bytes)
                 except Exception as ex:
@@ -139,6 +172,49 @@ class Table:
             hex_str = in_val if len(in_val) % 2 == 0 else '0' + in_val
             char_bytes[in_ch] = bytes.fromhex(hex_str)
 
+    @staticmethod
+    def _expand_wildcards(val, ch, val_map, char_map, char_bytes):
+        """Expand `**`/`%%` wildcard lines into 256/65536 entries.
+
+        Hot path for tables like LM3's eng.tbl which use `XX**=Y**` to define
+        a full 256-entry block. Uses pre-computed hex LUT and bypasses
+        _set_maps's per-call int parsing — for 65k+ entries the function-call
+        and string-parse overhead dominated table load time before this.
+        """
+        hex2 = _HEX2
+        has_pct = '%%' in val
+        # Resolve `**` once outside the loop. `str.replace` with a small
+        # pattern is faster than rebuilding the string per iteration with
+        # slicing because we benefit from the C-level replace impl.
+        # `int(s, 16)` and `bytes.fromhex(s)` are still called per entry —
+        # they are C builtins and dominate vs. the surrounding Python.
+        for d in range(0x100):
+            hd = hex2[d]
+            v1 = val.replace('**', hd)
+            c1 = ch.replace('**', hd)
+            if has_pct:
+                for e in range(0x100):
+                    he = hex2[e]
+                    v2 = v1.replace('%%', he)
+                    c2 = c1.replace('%%', he)
+                    dec = int(v2, 16)
+                    if dec not in val_map:
+                        val_map[dec] = c2
+                    if c2 not in char_map:
+                        char_map[c2] = dec
+                    if c2 not in char_bytes:
+                        hs = v2 if len(v2) % 2 == 0 else '0' + v2
+                        char_bytes[c2] = bytes.fromhex(hs)
+            else:
+                dec = int(v1, 16)
+                if dec not in val_map:
+                    val_map[dec] = c1
+                if c1 not in char_map:
+                    char_map[c1] = dec
+                if c1 not in char_bytes:
+                    hs = v1 if len(v1) % 2 == 0 else '0' + v1
+                    char_bytes[c1] = bytes.fromhex(hs)
+
     @property
     def encoding(self) -> Optional[str]:
         return self.__encoding
@@ -154,6 +230,16 @@ class Table:
     @property
     def char_map(self) -> dict[str, int]:
         return self.__chr_map
+
+    @property
+    def max_key_len(self) -> int:
+        """Longest key (in characters) across char_bytes. Cached at construction.
+
+        Used by encode_text() to bound the longest-match search; computing this
+        per-call was the dominant cost on tables with `**` wildcard expansion
+        (65k+ entries). See Plans/native-encoder-profile-results.md.
+        """
+        return self.__max_key_len
 
     @property
     def char_bytes(self) -> dict[str, bytes]:
