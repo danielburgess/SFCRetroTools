@@ -1,7 +1,7 @@
-"""Generate Mesen IPC command sequences from natural-language goals.
+"""Mesen IPC command-sequence shapes (IpcStep / IpcPlan).
 
-Provides structured templates the model fills in, rather than unstructured
-prose-to-command generation.
+Structured plan dataclasses external scripts can hand to either an LLM (to fill in step
+parameters) or a `MesenClient` (to apply step-by-step). No IPC traffic happens here.
 """
 from __future__ import annotations
 

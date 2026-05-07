@@ -1,4 +1,9 @@
-"""retrotool.ai — LLM-assisted RE workflows."""
+"""retrotool.ai — prompt templates and dataclass shapes for external LLM-driven scripts.
+
+This package does NOT call any LLM. It is a vocabulary — `str.format`-style prompt
+templates plus structured plan/workflow dataclasses — for downstream scripts that wire
+their own model client. See README §retrotool.ai for the intended usage pattern.
+"""
 from retrotool.ai.context import ProjectContext, build_context
 from retrotool.ai.ipc_prompt import IpcPlan, IpcStep, find_text_render_routine
 from retrotool.ai.prompts import (
