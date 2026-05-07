@@ -516,8 +516,8 @@ def handle_script(
                 f"{section.source}: <script> requires pointer-table= "
                 f"(or offset= for legacy concat mode)"
             )
-        from retrotool.script.table import Table as _LegacyTable
-        tbl = _LegacyTable(_resolve(Path(str(section.table)), root))
+        from retrotool.script.table import load_table as _load_legacy_table
+        tbl = _load_legacy_table(_resolve(Path(str(section.table)), root))
         text = _resolve(Path(str(section.files[0])), root).read_text(encoding="utf-8")
         lines = [ln for ln in text.splitlines() if ln]
         data = b"\x00".join(tbl.encode_text(ln) for ln in lines) + b"\x00"
@@ -566,8 +566,8 @@ def handle_script(
         # Host-side splitter context (e.g. ctrl_lengths from the loaded
         # Table) so generic splitters like `ctrl-aware` don't need the
         # table baked into config.
-        from retrotool.script.table import Table as _SplitTable
-        _slot_tbl = _SplitTable(str(table_path))
+        from retrotool.script.table import load_table as _load_split_table
+        _slot_tbl = _load_split_table(str(table_path))
         splitter_ctx = {
             "ctrl_lengths": getattr(_slot_tbl, "ctrl_lengths", {}) or {},
         }
@@ -896,12 +896,12 @@ def _pack_fixed_records(
         buf.extend(b"\xff" * (stride * count - len(buf)))
 
     from retrotool.script.encode import encode_text as _encode_text
-    from retrotool.script.table import Table as _Table
+    from retrotool.script.table import load_table as _load_t
 
-    tbl = table if hasattr(table, "char_map") else _Table(str(table))
+    tbl = table if hasattr(table, "char_map") else _load_t(str(table))
     fb_tbl = None
     if fallback_table is not None:
-        fb_tbl = fallback_table if hasattr(fallback_table, "char_map") else _Table(str(fallback_table))
+        fb_tbl = fallback_table if hasattr(fallback_table, "char_map") else _load_t(str(fallback_table))
 
     # Parse `<<...>>` blocks. Split on `<<` and take everything up to `>>`
     # as the header, rest as content until the next `<<`.
@@ -1047,7 +1047,7 @@ def _script_prepare_overflow(
         encode_windowed_script_file,
         _read_script_text as _read_text,
     )
-    from retrotool.script.table import Table as _WinTable
+    from retrotool.script.table import load_table as _load_win_table
     from retrotool.core.address import SFCAddress, SFCAddressType
 
     if section.pointer_table is None or section.count is None:
@@ -1061,7 +1061,7 @@ def _script_prepare_overflow(
         if section.fallback_table else None
     )
 
-    tbl = _WinTable(str(table_path))
+    tbl = _load_win_table(str(table_path))
     ctrl_lengths = tbl.ctrl_lengths
 
     # Original pointers — 2-byte, bank implicit from ptr_tbl_pc's bank.
