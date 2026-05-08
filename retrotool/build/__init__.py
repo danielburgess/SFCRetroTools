@@ -14,6 +14,13 @@ from retrotool.build.driver import BuildResult, SectionResult, build
 from retrotool.build.diff import DiffError, DiffResult, apply_ips, write_diff, write_ips, write_xdelta, xdelta_available
 from retrotool.build.extract import ExtractedSection, ExtractResult, extract
 from retrotool.build.handlers import HandlerError
+from retrotool.build.script_filter import (
+    IndexRange,
+    ScriptFilter,
+    ScriptTarget,
+    parse_only_args,
+    parse_only_token,
+)
 from retrotool.build.front_ends.mbxml import (
     MBXMLDeprecationWarning,
     migrate_mbxml,
@@ -63,4 +70,9 @@ __all__ = [
     "merge_sections",
     "sections_from_datadefs",
     "overflow",
+    "IndexRange",
+    "ScriptFilter",
+    "ScriptTarget",
+    "parse_only_args",
+    "parse_only_token",
 ]

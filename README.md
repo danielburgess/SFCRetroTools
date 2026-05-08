@@ -79,6 +79,8 @@ retrotool build <path>
                 [--diff ips|xdelta|both]
                 [--only KINDS]
                 [--skip KINDS]
+                [--script-step | --script-step-batch]
+                [--script-step-progress N]
                 [-j, --jobs N]
                 [--progress | --no-progress]
                 [-D NAME=VALUE]...
@@ -90,8 +92,11 @@ retrotool build <path>
 | `-o`, `--output OUT` | output ROM path. default: `<spec.name or spec.stem>.sfc` next to the spec. |
 | `--no-cache` | disable the per-section `BuildCache`. forces every section to re-run its handler. |
 | `--diff {ips,xdelta,both}` | override the spec's `diff=` setting. emits patches alongside the ROM. |
-| `--only KINDS` | comma-separated section **kinds** *or* **names** to run; everything else lands in `result.skipped`. matches `kind.value`, `from_datadef`, `attrs.name`, `attrs.alias`, and `source` suffixes. |
+| `--only KINDS` | comma-separated section **kinds** *or* **names** to run; everything else lands in `result.skipped`. matches `kind.value`, `from_datadef`, `attrs.name`, `attrs.alias`, and `source` suffixes. **Script-block targeting:** append `:BLOCK[-BLOCKEND][:WIN[-WINEND]]` to a script section name to narrow the build to specific entries (debugging). E.g. `dialog-1:42`, `dialog-1:42-50`, `dialog-1:42:0-3`. Block/window selectors require `placement.mode = "overflow"`. |
 | `--skip KINDS` | comma-separated kinds/names to exclude. |
+| `--script-step` | interactive successive-block build. requires `--only NAME` (or `--only NAME:LO-HI`). rebuilds the ROM repeatedly with `--script-step-progress` more blocks active each step, prompting **Enter** to advance, **q** to quit, **j N** to jump to step N. pair with an emulator that auto-reloads on file change to bisect a script regression. |
+| `--script-step-batch` | non-interactive variant of `--script-step`. writes one ROM per step to `<stem>.stepNNN.sfc` and exits. easier for scripted bisection or CI. |
+| `--script-step-progress N` | block-count increment per step (default `1`). |
 | `-j N`, `--jobs N` | gather-phase ThreadPool worker count. default = `os.cpu_count()`. `-j 1` = fully serial (debugging non-determinism). parallel-eligible kinds: `rep`, `ins`, `bin`, `graphics`, `fixed-records`, plus `<asar cache="1">` (diff-mode). |
 | `--progress` | force the animated braille spinner even when stderr is not a TTY (e.g. piping through `tee`). |
 | `--no-progress` | disable the progress reporter entirely. CI / log-only environments. |
@@ -108,6 +113,19 @@ retrotool build my-game/project.toml -o build/patched.sfc --diff xdelta -j 4
 
 # Build only asar patches and one named script section
 retrotool build my-game/ --only asar,main_dialog
+
+# Debug a script regression — only insert one block (overflow mode):
+retrotool build my-game/ --only main_dialog:42
+
+# Same, but block range + window subset:
+retrotool build my-game/ --only main_dialog:42-50:0-3
+
+# Bisect: rebuild interactively, +1 block per step, prompt between rebuilds
+retrotool build my-game/ --only main_dialog --script-step
+
+# Same, but emit one ROM per step (main_dialog.step001.sfc, .step002.sfc, ...)
+retrotool build my-game/ --only main_dialog --script-step-batch \
+    --script-step-progress 16
 
 # CI: log lines only, no animation, no cache (force fresh)
 retrotool build my-game/ --no-progress --no-cache
@@ -847,8 +865,8 @@ See [`project-plan.md`](./project-plan.md) for the full 16-phase plan and per-ph
 Short version:
 
 - **0.8.1** — 12 library modules scaffolded, core paths smoke-tested.
-- **0.8.2** (current) — LZSS overlap bugfix + optional SuperFamiconv 3graphics pipeline.
-- **0.9** — CLI (`retrotool …` subcommands) + example projects (lm3, rbshura, zamn, minimal)
+- **0.8.2** — LZSS overlap bugfix + optional SuperFamiconv 3graphics pipeline.
+- **0.9** — (current) CLI (`retrotool …` subcommands) + example projects (lm3, rbshura, zamn, minimal)
   + pytest suite.
 - **1.0 and beyond** — GUI shell with customizable project explorer, game-adaptable script editor, graphics extractor, 
   graphics editor, statistics polling the debugger, pointer-table inspector, asar build panel; and
