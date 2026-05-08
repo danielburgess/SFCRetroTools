@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from retrotool.build.script_filter import ScriptFilter
 from retrotool.build.spec import Section, SectionKind
 
 
@@ -412,14 +413,35 @@ def _script_placement_mode(section: Section, root: Path) -> str:
 
 def _script_prepare_relocate(
     rom_snapshot: bytes, section: Section, root: Path,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> _PreparedScript:
     """Worker-side encode for a relocate-mode <script> section.
 
     Pure: reads `script_path` + `table_path` + (optionally) a snapshot of
     `rom` for `slot-measure="source-entry"`. No allocator, no labels.
     Returns a `_PreparedScript` consumed by `handle_script()` in the apply
-    phase."""
+    phase.
+
+    Block/window filters are rejected here: relocate mode rewrites the
+    entire pointer table, so selectively rebuilding one entry without
+    re-encoding its neighbors would risk pointer drift. Section-level
+    filters (no block/window suffix) are honored by the section-level
+    `--only` / `--skip` mechanism; they don't reach this code.
+    """
+    from retrotool.build.driver import section_ids_for_filter
     from retrotool.script.encode import encode_script_file  # deferred
+
+    if script_filter is not None and not script_filter.is_empty():
+        ids = section_ids_for_filter(section)
+        if (script_filter.has_block_filter(ids)
+                or script_filter.has_window_filter(ids)):
+            raise HandlerError(
+                f"{section.source}: --only block/window filter requires "
+                f"placement.mode='overflow' (relocate mode rewrites the "
+                f"pointer table — partial rebuild would risk pointer drift). "
+                f"Either drop the block selector or switch the section to "
+                f"overflow mode."
+            )
 
     script_path = _resolve(Path(str(section.files[0])), root)
     table_path = _resolve(Path(str(section.table)), root)
@@ -461,6 +483,7 @@ def _script_prepare_relocate(
 
 def script_prepare(
     rom_snapshot: bytes, section: Section, root: Path,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> Optional[_PreparedScript]:
     """Driver-facing: run the worker-eligible encode phase for a script
     section. Returns None for paths that aren't worth (or safe to) parallelize
@@ -470,18 +493,23 @@ def script_prepare(
         return None
     mode = _script_placement_mode(section, root)
     if mode == "overflow":
-        return _script_prepare_overflow(rom_snapshot, section, root)
+        return _script_prepare_overflow(
+            rom_snapshot, section, root, script_filter=script_filter,
+        )
     # Relocate mode requires pointer-table + count; legacy concat mode is
     # serial-only.
     if section.pointer_table is None or section.count is None:
         return None
-    return _script_prepare_relocate(rom_snapshot, section, root)
+    return _script_prepare_relocate(
+        rom_snapshot, section, root, script_filter=script_filter,
+    )
 
 
 def handle_script(
     rom: bytearray, section: Section, root: Path,
     ctx: Optional[BuildContext] = None,
     prepared: Optional[_PreparedScript] = None,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> list[WriteRange]:
     """Pointer-table-driven script insertion.
 
@@ -507,7 +535,10 @@ def handle_script(
         raise HandlerError(f"{section.source}: <script> requires file=")
 
     if _script_placement_mode(section, root) == "overflow":
-        return _handle_script_windowed(rom, section, root, ctx, prepared=prepared)
+        return _handle_script_windowed(
+            rom, section, root, ctx,
+            prepared=prepared, script_filter=script_filter,
+        )
     # Legacy mode: no pointer-table, just concatenate Table.encode_text(line)
     # joined with $00. Kept so pre-phase-6 specs keep working.
     if section.pointer_table is None:
@@ -535,7 +566,9 @@ def handle_script(
         )
 
     if prepared is None:
-        prepared = _script_prepare_relocate(bytes(rom), section, root)
+        prepared = _script_prepare_relocate(
+            bytes(rom), section, root, script_filter=script_filter,
+        )
     if prepared.mode != "relocate" or prepared.entries is None:
         raise HandlerError(
             f"{section.source}: prepared payload mode mismatch "
@@ -1036,12 +1069,22 @@ def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Opti
 
 def _script_prepare_overflow(
     rom_snapshot: bytes, section: Section, root: Path,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> _PreparedScript:
     """Worker-side encode for an overflow-mode <script> section.
 
     Pure: reads script + table + (optionally) windowed-marker payload, plus a
     snapshot of the ptr table so `orig_pcs` can be resolved without touching
-    the live rom in apply phase. No allocator, no labels."""
+    the live rom in apply phase. No allocator, no labels.
+
+    When `script_filter` carries block/window rules that match this section,
+    non-allowed entries are masked to `b"\\x00"` (the auto-window handler
+    treats that as "preserve source bytes"), and non-allowed windows are
+    dropped from the per-entry windowed list. The pointer table is never
+    rewritten in overflow mode, so masking is a clean no-op for the masked
+    entries.
+    """
+    from retrotool.build.driver import section_ids_for_filter
     from retrotool.script.encode import (
         encode_script_file,
         encode_windowed_script_file,
@@ -1099,6 +1142,35 @@ def _script_prepare_overflow(
             script_path, table_path, fallback_table=fallback_path,
         )
 
+    if script_filter is not None and not script_filter.is_empty():
+        ids = section_ids_for_filter(section)
+        if script_filter.has_block_filter(ids):
+            # Mask non-allowed entries to the empty-placeholder sentinel.
+            # `_emit_auto_window_writes` short-circuits on `enc == b"\\x00"`
+            # (handlers.py: empty-placeholder skip), preserving source ROM
+            # bytes for those slots verbatim.
+            for i in range(len(auto_entries)):
+                if not script_filter.block_allowed(ids, i):
+                    auto_entries[i] = (b"\x00", None, [], {}, False)
+        if windowed is not None and (
+            script_filter.has_block_filter(ids)
+            or script_filter.has_window_filter(ids)
+        ):
+            new_windowed: list = []
+            for i, entry_windows in enumerate(windowed):
+                if entry_windows is None:
+                    new_windowed.append(None)
+                    continue
+                if not script_filter.block_allowed(ids, i):
+                    new_windowed.append(None)
+                    continue
+                kept = [
+                    w for w_idx, w in enumerate(entry_windows)
+                    if script_filter.window_allowed(ids, i, w_idx)
+                ]
+                new_windowed.append(kept if kept else None)
+            windowed = new_windowed
+
     return _PreparedScript(
         mode="overflow",
         auto_entries=auto_entries,
@@ -1114,6 +1186,7 @@ def _handle_script_windowed(
     rom: bytearray, section: Section, root: Path,
     ctx: Optional[BuildContext] = None,
     prepared: Optional[_PreparedScript] = None,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> list[WriteRange]:
     """`script` handler path for `placement.mode = "overflow"`.
 
@@ -1153,7 +1226,9 @@ def _handle_script_windowed(
     )
 
     if prepared is None:
-        prepared = _script_prepare_overflow(bytes(rom), section, root)
+        prepared = _script_prepare_overflow(
+            bytes(rom), section, root, script_filter=script_filter,
+        )
     if prepared.mode != "overflow" or prepared.auto_entries is None:
         raise HandlerError(
             f"{section.source}: prepared payload mode mismatch "

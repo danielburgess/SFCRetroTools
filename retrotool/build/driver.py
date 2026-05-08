@@ -34,6 +34,7 @@ from retrotool.build.handlers import BuildContext, HandlerError, WriteRange, get
 from retrotool.build.overflow import FreespaceAllocator
 from retrotool.build.interpolate import evaluate_condition
 from retrotool.build.reporter import Reporter, SectionStatus
+from retrotool.build.script_filter import ScriptFilter
 from retrotool.build.spec import BuildSpec, Section, SectionKind
 
 
@@ -336,6 +337,30 @@ def _section_label(section: Section) -> str:
     return section.kind.value
 
 
+def section_ids_for_filter(section: Section) -> set[str]:
+    """All lowercase identifiers that the section presents to `--only` /
+    `--skip` and the script filter. Mirrors the matchable forms documented
+    on `_section_kinds_filter`: kind, datadef name, attr name/alias, source
+    locator and its `:`-suffix, plus the `section[N]` positional alias.
+    """
+    ids: set[str] = {section.kind.value.lower()}
+    if section.from_datadef:
+        ids.add(section.from_datadef.lower())
+    for key in ("name", "alias"):
+        v = section.attrs.get(key)
+        if isinstance(v, str) and v:
+            ids.add(v.lower())
+    if section.source:
+        src = section.source.lower()
+        ids.add(src)
+        if ":" in src:
+            suffix = src.split(":", 1)[1]
+            ids.add(suffix)
+            if suffix.startswith("sections[") and suffix.endswith("]"):
+                ids.add("section[" + suffix[len("sections["):])
+    return ids
+
+
 def _section_kinds_filter(
     only: Optional[set[str]], skip: Optional[set[str]]
 ) -> Optional[Callable[[Section], bool]]:
@@ -356,30 +381,8 @@ def _section_kinds_filter(
     only_l = {s.lower() for s in (only or set())}
     skip_l = {s.lower() for s in (skip or set())}
 
-    def _ids(section: Section) -> set[str]:
-        ids: set[str] = {section.kind.value.lower()}
-        if section.from_datadef:
-            ids.add(section.from_datadef.lower())
-        # User-set alias / name on inline sections.
-        for key in ("name", "alias"):
-            v = section.attrs.get(key)
-            if isinstance(v, str) and v:
-                ids.add(v.lower())
-        if section.source:
-            # section.source is typically "datadef:<name>" or
-            # "<path>:sections[N]". Match the raw string, the ":"-suffix,
-            # and — for positional inline refs — the singular form.
-            src = section.source.lower()
-            ids.add(src)
-            if ":" in src:
-                suffix = src.split(":", 1)[1]
-                ids.add(suffix)
-                if suffix.startswith("sections[") and suffix.endswith("]"):
-                    ids.add("section[" + suffix[len("sections["):])
-        return ids
-
     def keep(section: Section) -> bool:
-        ids = _ids(section)
+        ids = section_ids_for_filter(section)
         if only_l and ids.isdisjoint(only_l):
             return False
         if skip_l and not ids.isdisjoint(skip_l):
@@ -431,6 +434,7 @@ def _gather_parallel(
 
 def _gather_script_prepare(
     section: Section, files_root: Path, scratch: bytearray,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> _GatherResult:
     """Worker entry: run `script_prepare` against a rom snapshot.
 
@@ -439,7 +443,10 @@ def _gather_script_prepare(
     apply phase invokes `handle_script` against the live rom with the
     prepared payload."""
     from retrotool.build.handlers import script_prepare as _script_prepare
-    prepared = _script_prepare(bytes(scratch), section, files_root)
+    prepared = _script_prepare(
+        bytes(scratch), section, files_root,
+        script_filter=script_filter,
+    )
     return _GatherResult(prepared=prepared)
 
 
@@ -454,6 +461,7 @@ def build(
     skip: Optional[set[str]] = None,
     parallel: Optional[int] = None,
     reporter: Optional[Reporter] = None,
+    script_filter: Optional[ScriptFilter] = None,
 ) -> BuildResult:
     """Apply `spec` to `original_rom` and write to `out_path`.
 
@@ -532,6 +540,12 @@ def build(
     skipped: list[Section] = []
     cache_hits = 0
     keep_kind = _section_kinds_filter(only, skip)
+    # A non-empty script_filter mutates handler output for the matched
+    # sections without changing inputs the cache key sees. Forcing a
+    # cache miss here is simpler and safer than embedding filter state
+    # into the key (the filter changes per CLI invocation; persisted
+    # entries would churn).
+    _filter_active = script_filter is not None and not script_filter.is_empty()
 
     def _section_is_kept(section: Section) -> bool:
         if keep_kind is not None and not keep_kind(section):
@@ -549,6 +563,13 @@ def build(
     if cache:
         for i, section in enumerate(spec.sections):
             if not _section_is_kept(section):
+                continue
+            # Script sections produce filter-dependent output; bypass cache
+            # when the filter is active so step-mode iterations don't all
+            # collapse to the first build's cached writes.
+            if _filter_active and section.kind in (
+                SectionKind.SCRIPT, SectionKind.WINDOWED_SCRIPT,
+            ):
                 continue
             key = _section_cache_key(section, files_root)
             if key:
@@ -612,11 +633,7 @@ def build(
         # source_snapshot` (used by overflow placement and `slot-measure
         # =source-entry`) but do NOT touch the live rom or shared state.
         scratch = bytearray(rom)
-        worker_fn = (
-            _gather_script_prepare
-            if _is_script_parallel_eligible(section)
-            else _gather_parallel
-        )
+        is_script_parallel = _is_script_parallel_eligible(section)
 
         # Fire GATHER from inside the worker (i.e. when a pool thread actually
         # picks the task up) rather than at submit-time. Otherwise the
@@ -629,7 +646,12 @@ def build(
             if reporter is not None:
                 reporter.section_status(idx, SectionStatus.GATHER)
             try:
-                return worker_fn(section, files_root, scratch)
+                if is_script_parallel:
+                    return _gather_script_prepare(
+                        section, files_root, scratch,
+                        script_filter=script_filter,
+                    )
+                return _gather_parallel(section, files_root, scratch)
             finally:
                 if reporter is not None:
                     reporter.section_status(idx, SectionStatus.GATHER_DONE)
@@ -679,6 +701,7 @@ def build(
                 raw = handler(
                     rom, section, files_root, ctx,
                     prepared=gathered.prepared,
+                    script_filter=script_filter,
                 )
             except Exception as exc:  # noqa: BLE001
                 if reporter is not None:

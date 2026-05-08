@@ -178,7 +178,7 @@ def _split_csv(s: Optional[str]) -> Optional[set[str]]:
 
 def _cmd_mbuild_build(args: argparse.Namespace) -> int:
     from retrotool.core.cache import BuildCache
-    from retrotool.build import build
+    from retrotool.build import build, parse_only_args
     from retrotool.build.reporter import make_reporter
     spec, spec_file = _load_spec(
         Path(args.path), defines=_parse_defines(args.define),
@@ -205,11 +205,20 @@ def _cmd_mbuild_build(args: argparse.Namespace) -> int:
             animate=(None if args.progress is None else args.progress),
             stream=sys.stderr,
         )
+    only_set, script_filter = parse_only_args(_split_csv(args.only))
+    if (args.script_step or args.script_step_batch):
+        return _run_script_step(
+            spec=spec, source_root=source_root, out=out, cache=cache,
+            only_set=only_set, skip_set=_split_csv(args.skip),
+            script_filter=script_filter, reporter=reporter,
+            parallel=resolved_jobs, args=args,
+        )
     with reporter or _NullCm():
         result = build(
             spec, source_root=source_root, out_path=out, cache=cache,
-            only=_split_csv(args.only), skip=_split_csv(args.skip),
+            only=only_set, skip=_split_csv(args.skip),
             parallel=resolved_jobs, reporter=reporter,
+            script_filter=script_filter if not script_filter.is_empty() else None,
         )
     print(f"rom:       {result.rom_path}")
     print(f"size:      {result.rom_size} bytes")
@@ -239,6 +248,201 @@ class _NullCm:
     block handles both progress-on and progress-off paths."""
     def __enter__(self): return self
     def __exit__(self, *a): return False
+
+
+def _resolve_step_target(
+    spec, only_set: Optional[set[str]], script_filter,
+) -> tuple[object, int, "IndexRange | None"]:
+    """Pick the single script section the step loop targets, plus its
+    block count and any pre-existing block_range from `--only`. Step mode
+    requires exactly one matching script section so step indices are
+    unambiguous; otherwise we don't know whose blocks to step."""
+    from retrotool.build import IndexRange, SectionKind
+    from retrotool.build.driver import _section_kinds_filter
+
+    if not only_set:
+        raise SystemExit(
+            "error: --script-step / --script-step-batch require --only NAME "
+            "(or --only NAME:BLOCK-RANGE) to select exactly one script section"
+        )
+    keep = _section_kinds_filter(only_set, None)
+    candidates = [
+        s for s in spec.sections
+        if s.kind in (SectionKind.SCRIPT, SectionKind.WINDOWED_SCRIPT)
+        and (keep is None or keep(s))
+    ]
+    if not candidates:
+        raise SystemExit(
+            f"error: --script-step: no script section matches --only "
+            f"{sorted(only_set)!r}"
+        )
+    if len(candidates) > 1:
+        names = []
+        for s in candidates:
+            names.append(s.from_datadef or s.attrs.get("name") or s.source or s.kind.value)
+        raise SystemExit(
+            f"error: --script-step: --only matches multiple script sections "
+            f"({names!r}); narrow to one"
+        )
+    section = candidates[0]
+    if section.count is None:
+        raise SystemExit(
+            f"error: --script-step: section {section.source!r} has no count= "
+            f"(can't enumerate blocks)"
+        )
+    # Surface any block range the user already typed via --only NAME:LO-HI so
+    # step iteration walks just that subrange instead of the whole section.
+    pre_block: Optional[IndexRange] = None
+    if not script_filter.is_empty():
+        # Pull the first block_range we find for this section; multiple rules
+        # can't combine unambiguously into a single step iteration.
+        sec_id_options = {section.from_datadef or "",
+                          section.attrs.get("name") or "",
+                          section.attrs.get("alias") or ""}
+        sec_id_options = {x.lower() for x in sec_id_options if x}
+        for sid, rules in script_filter.targets_by_id.items():
+            if sid in sec_id_options:
+                ranges = [r.block_range for r in rules if r.block_range is not None]
+                if ranges:
+                    if len(ranges) > 1:
+                        raise SystemExit(
+                            f"error: --script-step: multiple block ranges in "
+                            f"--only for section {sid!r}; narrow to one"
+                        )
+                    pre_block = ranges[0]
+                    break
+    return section, int(section.count), pre_block
+
+
+def _run_script_step(
+    *, spec, source_root, out, cache, only_set, skip_set,
+    script_filter, reporter, parallel, args,
+) -> int:
+    """Repeated build with a successive (cumulative) block range.
+
+    Each step rebuilds with the filter narrowed to `[lo, lo + step*progress)`.
+    Interactive mode waits for a keypress between steps; batch writes
+    `<stem>.stepNNN.sfc` and exits.
+    """
+    from retrotool.build import (
+        IndexRange, ScriptFilter, ScriptTarget, build,
+    )
+
+    section, total, pre_block = _resolve_step_target(
+        spec, only_set, script_filter,
+    )
+    progress = max(1, args.script_step_progress or 1)
+    lo = pre_block.lo if pre_block is not None else 0
+    hi_cap = min(pre_block.hi, total - 1) if pre_block is not None else total - 1
+    if lo > hi_cap:
+        raise SystemExit(
+            f"error: --script-step: empty block range {lo}..{hi_cap}"
+        )
+    n_steps = ((hi_cap - lo) // progress) + 1
+    section_id = (
+        section.from_datadef
+        or section.attrs.get("name")
+        or section.attrs.get("alias")
+        or ""
+    )
+    if not section_id:
+        raise SystemExit(
+            f"error: --script-step: section {section.source!r} has no usable "
+            f"name; set [section.name] or use --only with a datadef name"
+        )
+
+    print(
+        f"step mode: section={section_id!r} blocks={lo}..{hi_cap} "
+        f"({total} total) progress={progress} steps={n_steps}"
+    )
+    if args.script_step_batch:
+        print("mode: batch (writing one ROM per step)")
+    else:
+        print("mode: interactive (Enter=advance, q=quit, j N=jump to step N)")
+
+    step = 1
+    while step <= n_steps:
+        cur_hi = min(lo + step * progress - 1, hi_cap)
+        sf = ScriptFilter()
+        sf.add(ScriptTarget(
+            section_id=section_id,
+            block_range=IndexRange(lo, cur_hi),
+            window_range=(
+                pre_block_window_range(script_filter, section_id)
+                if not script_filter.is_empty() else None
+            ),
+        ))
+        if args.script_step_batch:
+            step_out = out.with_suffix("")
+            step_out = Path(f"{step_out}.step{step:03d}{out.suffix}")
+        else:
+            step_out = out
+        with reporter or _NullCm():
+            result = build(
+                spec, source_root=source_root, out_path=step_out,
+                cache=cache, only=only_set, skip=skip_set,
+                parallel=parallel, reporter=reporter,
+                script_filter=sf,
+            )
+        print(
+            f"step {step}/{n_steps}  blocks {lo}..{cur_hi}  "
+            f"-> {step_out.name}  ({result.rom_size:,}b, "
+            f"{result.duration_ms} ms)"
+        )
+        if args.script_step_batch:
+            step += 1
+            continue
+        nxt = _step_prompt(step, n_steps)
+        if nxt is None:
+            print("aborted")
+            return 0
+        step = nxt
+    return 0
+
+
+def pre_block_window_range(script_filter, section_id: str):
+    """If the user's --only included `:BLOCK:WIN-WIN`, surface that window
+    range so step mode can preserve it. Mirrors the block range carry-over."""
+    sec = section_id.lower()
+    rules = script_filter.targets_by_id.get(sec, [])
+    for r in rules:
+        if r.window_range is not None:
+            return r.window_range
+    return None
+
+
+def _step_prompt(cur: int, total: int) -> Optional[int]:
+    """Ask user what to do next. Returns the next step number, or None to quit.
+
+    Empty input → cur+1 (advance). 'q' / EOF → quit. 'j N' → jump to step N.
+    """
+    while True:
+        try:
+            sys.stderr.write(
+                f"  step {cur}/{total}: [Enter]=next, q=quit, j N=jump > "
+            )
+            sys.stderr.flush()
+            line = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not line:
+            return None
+        s = line.strip().lower()
+        if s in ("q", "quit", "exit"):
+            return None
+        if not s:
+            return cur + 1
+        if s.startswith("j"):
+            try:
+                n = int(s[1:].strip())
+            except ValueError:
+                sys.stderr.write(f"  invalid jump target: {line.strip()!r}\n")
+                continue
+            if n < 1 or n > total:
+                sys.stderr.write(f"  out of range (1..{total})\n")
+                continue
+            return n
+        sys.stderr.write(f"  unrecognized input: {line.strip()!r}\n")
 
 
 def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
@@ -362,9 +566,26 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="override spec diff setting")
     bb.add_argument("--only", default=None,
                     help="comma-separated section kinds OR names to run "
-                         "(e.g. asar,script,scene-desc-name)")
+                         "(e.g. asar,script,scene-desc-name). For script "
+                         "sections, append a block selector to narrow the "
+                         "build to specific entries — useful for debugging: "
+                         "NAME:BLOCK, NAME:LO-HI, NAME:BLOCK:WIN, "
+                         "NAME:LO-HI:WLO-WHI. Block/window selectors require "
+                         "placement.mode=overflow.")
     bb.add_argument("--skip", default=None,
                     help="comma-separated section kinds OR names to skip")
+    bb.add_argument("--script-step", action="store_true",
+                    help="interactive successive-block build: rebuild once "
+                         "per step adding `--script-step-progress` more "
+                         "blocks each time, prompting Enter/q/j between "
+                         "rebuilds. Requires --only NAME (or NAME:LO-HI).")
+    bb.add_argument("--script-step-batch", action="store_true",
+                    help="non-interactive variant of --script-step. Writes "
+                         "<stem>.stepNNN.sfc per step instead of "
+                         "overwriting the same file, no prompts.")
+    bb.add_argument("--script-step-progress", type=int, default=1,
+                    metavar="N",
+                    help="block-count increment per step (default 1).")
     bb.add_argument("-j", "--jobs", type=int, default=None,
                     help="gather-phase worker thread count. Default: 1 "
                          "(serial) — overridable via [rom.build].jobs in "
