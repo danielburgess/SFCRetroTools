@@ -149,3 +149,147 @@ def test_short_and_long_aliases_both_documented(readme, subparsers):
         pytest.fail(
             f"{len(missing)} flag alias(es) only partially documented:\n{rows}"
         )
+
+
+# ---- Python-API drift guards ---------------------------------------------
+#
+# The README markets retrotool as a library-first toolkit; every snippet in a
+# `\`\`\`python` fenced block must continue to import and resolve, otherwise
+# users land on broken examples. This caught the deletion of `retrotool.Rom`
+# in the cleanup commit (the README still documented `Rom.load(...)`).
+
+import ast
+import importlib
+import re
+
+
+def _python_blocks(text: str) -> list[tuple[int, str]]:
+    """Yield (1-based block index, source) for every fenced ```python block.
+
+    Ordering matches README order so failure messages name the block the
+    reader can find by counting from the top.
+    """
+    return list(enumerate(
+        re.findall(r"```python\n(.*?)\n```", text, flags=re.DOTALL),
+        start=1,
+    ))
+
+
+def test_readme_python_blocks_all_compile(readme):
+    """Each fenced ```python block must parse — guards against typo / drift
+    that breaks the tutorial examples even before imports are checked."""
+    bad: list[tuple[int, str]] = []
+    for idx, block in _python_blocks(readme):
+        try:
+            compile(block, f"<README block {idx}>", "exec")
+        except SyntaxError as e:
+            bad.append((idx, str(e)))
+    if bad:
+        rows = "\n".join(f"  block #{i}: {msg}" for i, msg in bad)
+        pytest.fail(f"{len(bad)} README python block(s) failed to parse:\n{rows}")
+
+
+def test_readme_python_block_imports_resolve(readme):
+    """For every `from retrotool[...] import A, B` (and `import retrotool[...]`)
+    line in a README python block, the module must import and every named
+    symbol must exist on it. This is the canary that fired on the missing
+    `Rom` re-export — keep it green and the documented Python API can't
+    silently rot away.
+    """
+    failures: list[tuple[int, str, str]] = []
+    for idx, block in _python_blocks(readme):
+        try:
+            tree = ast.parse(block)
+        except SyntaxError:
+            continue  # already reported by the compile test
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if not mod.startswith("retrotool"):
+                    continue  # third-party (Path, etc.) — not our concern
+                try:
+                    m = importlib.import_module(mod)
+                except Exception as e:  # noqa: BLE001
+                    failures.append((idx, f"from {mod}", repr(e)))
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    if not hasattr(m, alias.name):
+                        failures.append((
+                            idx, f"from {mod} import {alias.name}",
+                            f"AttributeError: module {mod!r} has no "
+                            f"attribute {alias.name!r}",
+                        ))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if not alias.name.startswith("retrotool"):
+                        continue
+                    try:
+                        importlib.import_module(alias.name)
+                    except Exception as e:  # noqa: BLE001
+                        failures.append((
+                            idx, f"import {alias.name}", repr(e),
+                        ))
+    if failures:
+        rows = "\n".join(
+            f"  block #{i}: {what} → {why}" for i, what, why in failures
+        )
+        pytest.fail(
+            f"{len(failures)} README import claim(s) don't resolve:\n"
+            f"{rows}\n\n"
+            f"Either restore the missing symbol to the public API, or "
+            f"update README.md to match the current code."
+        )
+
+
+def test_readme_attribute_access_on_imported_symbols(readme):
+    """For every `Symbol.attr` reference in a README python block where
+    `Symbol` was just imported from a `retrotool` module, verify `.attr`
+    exists on the imported object.
+
+    Catches renames like `Rom.load → Rom.from_path` where the import line
+    still resolves but the documented method is gone. Conservative: only
+    checks `Name.attr` (no chained / call-result attribute access).
+    """
+    failures: list[tuple[int, str, str]] = []
+    for idx, block in _python_blocks(readme):
+        try:
+            tree = ast.parse(block)
+        except SyntaxError:
+            continue
+        sym_to_obj: dict[str, object] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if not mod.startswith("retrotool"):
+                    continue
+                try:
+                    m = importlib.import_module(mod)
+                except Exception:  # noqa: BLE001
+                    continue
+                for alias in node.names:
+                    key = alias.asname or alias.name
+                    if hasattr(m, alias.name):
+                        sym_to_obj[key] = getattr(m, alias.name)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in sym_to_obj
+            ):
+                obj = sym_to_obj[node.value.id]
+                if not hasattr(obj, node.attr):
+                    failures.append((
+                        idx,
+                        f"{node.value.id}.{node.attr}",
+                        f"{type(obj).__name__} has no attribute {node.attr!r}",
+                    ))
+    if failures:
+        rows = "\n".join(
+            f"  block #{i}: {what} — {why}" for i, what, why in failures
+        )
+        pytest.fail(
+            f"{len(failures)} README attribute reference(s) no longer exist:\n"
+            f"{rows}"
+        )

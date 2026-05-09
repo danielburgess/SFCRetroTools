@@ -287,6 +287,65 @@ retrotool libsfx clean --full       # nuclear: also wipe BuildCache
 | `1` | uncaught error (printed as `error: <msg>` on stderr) |
 | `2` | extract destination ambiguous (`--lang` not in `data_dirs_by_lang`, or no dest specified at all) |
 
+---
+
+### Driving retrotool from Python
+
+Every `retrotool <cmd>` subcommand has a corresponding function in
+`retrotool.build` that takes Python-friendly kwargs, prints the same
+progress reporter + summary by default, and returns a structured result.
+The CLI is a thin argparse layer on top — anything you can do via the
+shell, you can do from a notebook or a build script.
+
+```python
+from retrotool.build import build_project
+
+result = build_project("my-game/", diff="xdelta", jobs=4)
+print(result.rom_path, result.checksum, result.duration_ms)
+```
+
+```python
+# Quiet build (no progress, no summary) for CI / scripting:
+result = build_project(
+    "my-game/", no_progress=True, print_summary=False,
+    only={"asar", "main_dialog:42"},        # set / list / CSV string all work
+    defines={"version": "en"},
+)
+```
+
+```python
+# Programmatic bisection — equivalent to `--script-step-batch`:
+from retrotool.build import iter_step_builds, load_spec
+spec, spec_file = load_spec("my-game/")
+section = next(s for s in spec.sections if s.from_datadef == "main_dialog")
+for step, total, result, out in iter_step_builds(
+    spec, section=section, source_root=spec_file.parent,
+    out_path=spec_file.parent / "main_dialog.sfc",
+    progress=16,                            # 16 blocks per step
+):
+    print(f"step {step}/{total}: {out.name} ({result.rom_size:,}b)")
+```
+
+| function | CLI equivalent |
+|---|---|
+| `build_project(path, **opts)` | `retrotool build <path>` |
+| `extract_project(path, lang=, dest=, ...)` | `retrotool extract <path>` |
+| `migrate_project(path, in_place=)` | `retrotool migrate <path>` |
+| `iter_step_builds(spec, section=, ...)` | `--script-step-batch` (loop body) |
+| `build_libsfx_project(dir, debug=, output=)` | `retrotool libsfx build` |
+| `info_libsfx_project(dir)` | `retrotool libsfx info` |
+| `clean_libsfx_project(dir, full=)` | `retrotool libsfx clean` |
+| `scaffold_libsfx_project(dir, template=)` | `retrotool libsfx scaffold` |
+
+Helpers used by the facade (also part of the public API):
+`load_spec()`, `resolve_spec_path()`, `parse_defines()`,
+`parse_csv_set()`, `parse_only_args()`, `parse_only_token()`,
+`resolve_extract_dest()`, `resolve_jobs()`, `default_output_path()`,
+`default_cache_dir()`, `make_overwrite_confirmer()`,
+`workers_for_print()`. Pass any of `print_summary=False`,
+`summary_stream=…`, `progress_stream=…`, `no_progress=True` to
+silence or redirect the CLI-style output.
+
 ## Package Layout
 
 ```

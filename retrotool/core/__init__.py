@@ -14,12 +14,13 @@ from retrotool.core.binary import (
 )
 from retrotool.core.cache import BuildCache, CacheEntry, sha256_bytes, sha256_file, sha256_many
 from retrotool.core.pointer import SFCPointer
-from retrotool.core.rom import RomHeader, detect_header, lorom_to_hirom
+from retrotool.core.rom import Rom, RomHeader, detect_header, lorom_to_hirom
 
 __all__ = [
     "SFCAddress",
     "SFCAddressType",
     "SFCPointer",
+    "Rom",
     "RomHeader",
     "detect_header",
     "lorom_to_hirom",

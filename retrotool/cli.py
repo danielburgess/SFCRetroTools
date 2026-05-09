@@ -1,14 +1,23 @@
-"""retrotool CLI entry point.
+"""retrotool CLI entry point — thin argparse layer over `retrotool.build`.
+
+Each subcommand below maps 1:1 to a public function in
+`retrotool.build.project`. Anything you can do via this CLI is also
+reachable from Python; see :mod:`retrotool.build.project` for the
+function-level API.
 
 Subcommands:
 
     retrotool build <path> [-o rom] [--no-cache] [--diff ips|xdelta|both]
-    retrotool extract <path> [--dest DIR]
+                           [--only NAMES] [--skip NAMES]
+                           [--script-step | --script-step-batch]
+                           [--script-step-progress N]
+                           [-j N] [--progress|--no-progress] [-D NAME=VALUE]
+    retrotool extract <path> [--lang CODE | --dest DIR] [--only/--skip ...]
     retrotool migrate <path> [--in-place]
     retrotool libsfx scaffold <dir> [--template NAME]
-    retrotool libsfx build [<dir>] [--debug 0|1|2] [-o out.sfc]
-    retrotool libsfx info <dir>
-    retrotool libsfx clean <dir>
+    retrotool libsfx build    [<dir>] [--debug 0|1|2] [-o out.sfc]
+    retrotool libsfx info     <dir>
+    retrotool libsfx clean    <dir> [--full]
 
 <path> may be a `.mbxml`, a `.toml`, or a directory containing either
 (project.toml takes precedence over `*.mbxml` when both exist).
@@ -16,255 +25,104 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 
+# ---- libSFX subcommands ---------------------------------------------------
+
 def _cmd_scaffold(args: argparse.Namespace) -> int:
-    from retrotool.asm.libsfx import scaffold_libsfx_project
-    dest = scaffold_libsfx_project(Path(args.dir), template=args.template)
-    print(f"scaffolded {args.template!r} into {dest}")
+    from retrotool.build import scaffold_libsfx_project
+    scaffold_libsfx_project(Path(args.dir), template=args.template)
     return 0
 
 
-def _load_project(root: Path):
-    from retrotool.asm.libsfx import LibSFXProject
-    return LibSFXProject.discover(root)
-
-
 def _cmd_build(args: argparse.Namespace) -> int:
-    proj = _load_project(Path(args.dir))
-    if args.debug is not None:
-        proj.cfg.debug = args.debug
-    out = Path(args.output) if args.output else None
-    result = proj.build(out_rom=out)
-    print(f"rom:       {result.rom}")
-    print(f"size:      {result.rom.stat().st_size} bytes")
-    print(f"checksum:  ${result.header.checksum_after:04X} (valid={result.header.is_valid})")
-    print(f"duration:  {result.duration_ms} ms")
-    if result.symfile:
-        print(f"symfile:   {result.symfile}")
-    if result.mapfile:
-        print(f"mapfile:   {result.mapfile}")
-    if result.breakpoints:
-        print(f"mesen .bp: {result.breakpoints}")
+    from retrotool.build import build_libsfx_project
+    build_libsfx_project(
+        Path(args.dir),
+        debug=args.debug,
+        output=args.output,
+    )
     return 0
 
 
 def _cmd_info(args: argparse.Namespace) -> int:
-    proj = _load_project(Path(args.dir))
-    srcs = proj.sources()
-    print(f"root:       {proj.root}")
-    print(f"name:       {proj.cfg.name}")
-    print(f"debug:      {proj.cfg.debug}")
-    print(f"map_config: {proj.cfg.map_config}")
-    print(f"obj_dir:    {proj.cfg.obj_dir}")
-    for kind, paths in srcs.items():
-        print(f"{kind} sources ({len(paths)}):")
-        for p in paths:
-            print(f"  {p.relative_to(proj.root) if p.is_relative_to(proj.root) else p}")
+    from retrotool.build import info_libsfx_project
+    info_libsfx_project(Path(args.dir))
     return 0
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
-    proj = _load_project(Path(args.dir))
-    proj.clean()
-    rom = proj.root / f"{proj.cfg.name}.sfc"
-    if rom.exists():
-        rom.unlink()
-    cache = proj.root / ".cache"
-    if args.full and cache.exists():
-        shutil.rmtree(cache)
-    print(f"cleaned {proj.root}")
+    from retrotool.build import clean_libsfx_project
+    clean_libsfx_project(Path(args.dir), full=args.full)
     return 0
 
 
-# ---- mbuild dispatch ------------------------------------------------------
-
-def _resolve_spec_path(path: Path) -> tuple[Path, str]:
-    """Return (file, kind) where kind in {"mbxml","toml"}.
-
-    If `path` is a directory, prefer `project.toml`, then the single `*.mbxml`
-    inside it. Raises if ambiguous or nothing found.
-    """
-    if path.is_dir():
-        toml = path / "project.toml"
-        if toml.exists():
-            return toml, "toml"
-        mbxmls = sorted(path.glob("*.mbxml"))
-        if len(mbxmls) == 1:
-            return mbxmls[0], "mbxml"
-        if not mbxmls:
-            raise FileNotFoundError(
-                f"no project.toml or *.mbxml found in {path}"
-            )
-        raise FileNotFoundError(
-            f"multiple *.mbxml in {path}; pass one explicitly"
-        )
-    if not path.exists():
-        raise FileNotFoundError(path)
-    suf = path.suffix.lower()
-    if suf in (".mbxml", ".xml"):
-        return path, "mbxml"
-    if suf == ".toml":
-        return path, "toml"
-    raise ValueError(f"unrecognized spec file extension: {path.suffix!r}")
-
-
-def _load_spec(
-    path: Path,
-    *,
-    defines: Optional[dict[str, str]] = None,
-    defer_datadefs: bool = False,
-):
-    """Parse spec. When `defer_datadefs=True`, returns (spec, spec_file,
-    finalize) — caller invokes `finalize()` after mutating spec.en_data_dir
-    to pick a datadef resolution root (used by `extract --lang`)."""
-    from retrotool.build import parse_mbxml, parse_project_toml, apply_datadefs_to_spec
-    spec_file, kind = _resolve_spec_path(path)
-    if kind == "mbxml":
-        spec = parse_mbxml(spec_file, defines=defines)
-        if defer_datadefs:
-            return spec, spec_file, (lambda: None)
-        return spec, spec_file
-    spec = parse_project_toml(spec_file, defines=defines)
-    # Auto-include DataDefs with a `[section]` sub-table from `data_dirs`.
-    # Inline `[[rom.build.sections]]` and DataDef-derived sections are merged
-    # and ordered (by offset, or by `[rom.build].order = [...]`). A section
-    # is always defined in exactly one place — no cross-file duplication.
-    from retrotool.project.loader import load_project, load_datadefs
-    try:
-        project = load_project(spec_file)
-    except (FileNotFoundError, ValueError):
-        project = None  # bare TOML without `[rom]` — inline-only build
-
-    def _finalize():
-        if project is not None and project.data_dirs:
-            datadefs = load_datadefs(project)
-            apply_datadefs_to_spec(spec, datadefs, order=spec.order)
-        elif spec.order:
-            apply_datadefs_to_spec(spec, [], order=spec.order)
-
-    if defer_datadefs:
-        return spec, spec_file, _finalize
-    _finalize()
-    return spec, spec_file
-
-
-def _parse_defines(pairs: Optional[list[str]]) -> dict[str, str]:
-    """Parse `-D name=value` flags. Multiple `-D` accepted; last value wins
-    on duplicate keys. Raises SystemExit for malformed entries."""
-    out: dict[str, str] = {}
-    for item in pairs or ():
-        if "=" not in item:
-            raise SystemExit(f"-D expects name=value, got: {item!r}")
-        k, _, v = item.partition("=")
-        k = k.strip()
-        if not k:
-            raise SystemExit(f"-D expects non-empty name, got: {item!r}")
-        out[k] = v
-    return out
-
-
-def _split_csv(s: Optional[str]) -> Optional[set[str]]:
-    if not s:
-        return None
-    return {x.strip() for x in s.split(",") if x.strip()}
-
+# ---- mbuild subcommands ---------------------------------------------------
 
 def _cmd_mbuild_build(args: argparse.Namespace) -> int:
-    from retrotool.core.cache import BuildCache
-    from retrotool.build import build, parse_only_args
+    from retrotool.build import build_project
+
+    if args.script_step or args.script_step_batch:
+        return _run_script_step(args)
+
+    progress: Optional[bool] = (
+        None if args.progress is None else args.progress
+    )
+    build_project(
+        Path(args.path),
+        output=args.output,
+        no_cache=args.no_cache,
+        diff=args.diff,
+        only=args.only,
+        skip=args.skip,
+        jobs=args.jobs,
+        progress=progress,
+        no_progress=args.no_progress,
+        defines=args.define,
+    )
+    return 0
+
+
+def _run_script_step(args: argparse.Namespace) -> int:
+    """Drive `iter_step_builds()` from CLI flags.
+
+    Interactive mode rebuilds to the same output path each step (so an
+    auto-reloading emulator can pick up the change) and waits for a
+    keypress between rebuilds. Batch mode emits `<stem>.stepNNN<suffix>`
+    per step and exits non-interactively.
+    """
+    from retrotool.build import (
+        SectionKind, build_project, iter_step_builds, load_spec,
+        parse_csv_set, parse_defines, parse_only_args,
+        default_output_path, default_cache_dir, resolve_jobs,
+    )
+    from retrotool.build.driver import _section_kinds_filter
     from retrotool.build.reporter import make_reporter
-    spec, spec_file = _load_spec(
-        Path(args.path), defines=_parse_defines(args.define),
+    from retrotool.core.cache import BuildCache
+
+    spec, spec_file = load_spec(
+        Path(args.path),
+        defines=parse_defines(args.define) if args.define else None,
     )
     if args.diff is not None:
         spec.diff = args.diff
     source_root = spec_file.parent
-    if args.output:
-        out = Path(args.output)
-    else:
-        name = spec.name or spec_file.stem
-        out = source_root / f"{name}.sfc"
-    cache = None if args.no_cache else BuildCache(source_root / ".cache")
-    # CLI `-j` wins; otherwise consult spec.jobs from project.toml/MBXML;
-    # otherwise leave None and let the driver pick its default (serial).
-    # `0` (CLI or spec) means "auto" → os.cpu_count().
-    resolved_jobs = args.jobs if args.jobs is not None else spec.jobs
-    # Pick a reporter: TTY → animated braille spinner; else line-per-event log.
-    # `--no-progress` forces silent (None reporter — build runs without UI).
-    if args.no_progress:
-        reporter = None
-    else:
-        reporter = make_reporter(
-            animate=(None if args.progress is None else args.progress),
-            stream=sys.stderr,
-        )
-    only_set, script_filter = parse_only_args(_split_csv(args.only))
-    if (args.script_step or args.script_step_batch):
-        return _run_script_step(
-            spec=spec, source_root=source_root, out=out, cache=cache,
-            only_set=only_set, skip_set=_split_csv(args.skip),
-            script_filter=script_filter, reporter=reporter,
-            parallel=resolved_jobs, args=args,
-        )
-    with reporter or _NullCm():
-        result = build(
-            spec, source_root=source_root, out_path=out, cache=cache,
-            only=only_set, skip=_split_csv(args.skip),
-            parallel=resolved_jobs, reporter=reporter,
-            script_filter=script_filter if not script_filter.is_empty() else None,
-        )
-    print(f"rom:       {result.rom_path}")
-    print(f"size:      {result.rom_size} bytes")
-    if result.checksum is not None:
-        print(f"checksum:  ${result.checksum:04X}")
-    print(f"sections:  {len(result.sections)} "
-          f"(cache hits: {result.cache_hits}, skipped: {len(result.skipped)})")
-    for d in result.diffs:
-        if d.skipped:
-            print(f"diff:      {d.format} skipped — {d.note}")
-        else:
-            print(f"diff:      {d.format} → {d.path} ({d.size} bytes)")
-    if resolved_jobs is None:
-        workers = 1
-    elif resolved_jobs == 0:
-        workers = os.cpu_count() or 1
-    else:
-        workers = max(1, resolved_jobs)
-    print(f"workers:   {workers}{' (serial)' if workers == 1 else ''}")
-    print(f"duration:  {result.duration_ms} ms")
-    print(f"finished:  {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
-    return 0
-
-
-class _NullCm:
-    """No-op context manager used when `reporter is None` so the same `with`
-    block handles both progress-on and progress-off paths."""
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-
-
-def _resolve_step_target(
-    spec, only_set: Optional[set[str]], script_filter,
-) -> tuple[object, int, "IndexRange | None"]:
-    """Pick the single script section the step loop targets, plus its
-    block count and any pre-existing block_range from `--only`. Step mode
-    requires exactly one matching script section so step indices are
-    unambiguous; otherwise we don't know whose blocks to step."""
-    from retrotool.build import IndexRange, SectionKind
-    from retrotool.build.driver import _section_kinds_filter
+    out = Path(args.output) if args.output else default_output_path(spec, spec_file)
+    cache = None if args.no_cache else BuildCache(default_cache_dir(source_root))
+    resolved_jobs = resolve_jobs(args.jobs, spec.jobs)
+    only_set, script_filter = parse_only_args(parse_csv_set(args.only))
+    skip_set = parse_csv_set(args.skip)
 
     if not only_set:
-        raise SystemExit(
+        sys.stderr.write(
             "error: --script-step / --script-step-batch require --only NAME "
-            "(or --only NAME:BLOCK-RANGE) to select exactly one script section"
+            "(or --only NAME:LO-HI) to select exactly one script section\n"
         )
+        return 2
+
     keep = _section_kinds_filter(only_set, None)
     candidates = [
         s for s in spec.sections
@@ -272,143 +130,130 @@ def _resolve_step_target(
         and (keep is None or keep(s))
     ]
     if not candidates:
-        raise SystemExit(
+        sys.stderr.write(
             f"error: --script-step: no script section matches --only "
-            f"{sorted(only_set)!r}"
+            f"{sorted(only_set)!r}\n"
         )
+        return 2
     if len(candidates) > 1:
-        names = []
-        for s in candidates:
-            names.append(s.from_datadef or s.attrs.get("name") or s.source or s.kind.value)
-        raise SystemExit(
+        names = [
+            s.from_datadef or s.attrs.get("name") or s.source or s.kind.value
+            for s in candidates
+        ]
+        sys.stderr.write(
             f"error: --script-step: --only matches multiple script sections "
-            f"({names!r}); narrow to one"
+            f"({names!r}); narrow to one\n"
         )
+        return 2
     section = candidates[0]
-    if section.count is None:
-        raise SystemExit(
-            f"error: --script-step: section {section.source!r} has no count= "
-            f"(can't enumerate blocks)"
-        )
-    # Surface any block range the user already typed via --only NAME:LO-HI so
-    # step iteration walks just that subrange instead of the whole section.
-    pre_block: Optional[IndexRange] = None
+
+    # Honor `--only NAME:LO-HI` if the user pre-narrowed the range.
+    block_lo, block_hi = 0, None
+    extra_window_range = None
+    sec_id_options = {
+        section.from_datadef or "",
+        section.attrs.get("name") or "",
+        section.attrs.get("alias") or "",
+    }
+    sec_id_options = {x.lower() for x in sec_id_options if x}
     if not script_filter.is_empty():
-        # Pull the first block_range we find for this section; multiple rules
-        # can't combine unambiguously into a single step iteration.
-        sec_id_options = {section.from_datadef or "",
-                          section.attrs.get("name") or "",
-                          section.attrs.get("alias") or ""}
-        sec_id_options = {x.lower() for x in sec_id_options if x}
         for sid, rules in script_filter.targets_by_id.items():
-            if sid in sec_id_options:
-                ranges = [r.block_range for r in rules if r.block_range is not None]
-                if ranges:
-                    if len(ranges) > 1:
-                        raise SystemExit(
-                            f"error: --script-step: multiple block ranges in "
-                            f"--only for section {sid!r}; narrow to one"
-                        )
-                    pre_block = ranges[0]
-                    break
-    return section, int(section.count), pre_block
+            if sid not in sec_id_options:
+                continue
+            br = [r.block_range for r in rules if r.block_range is not None]
+            wr = [r.window_range for r in rules if r.window_range is not None]
+            if len(br) > 1 or len(wr) > 1:
+                sys.stderr.write(
+                    f"error: --script-step: multiple block/window ranges in "
+                    f"--only for section {sid!r}; narrow to one\n"
+                )
+                return 2
+            if br:
+                block_lo, block_hi = br[0].lo, br[0].hi
+            if wr:
+                extra_window_range = wr[0]
 
+    progress_per_step = max(1, args.script_step_progress or 1)
 
-def _run_script_step(
-    *, spec, source_root, out, cache, only_set, skip_set,
-    script_filter, reporter, parallel, args,
-) -> int:
-    """Repeated build with a successive (cumulative) block range.
-
-    Each step rebuilds with the filter narrowed to `[lo, lo + step*progress)`.
-    Interactive mode waits for a keypress between steps; batch writes
-    `<stem>.stepNNN.sfc` and exits.
-    """
-    from retrotool.build import (
-        IndexRange, ScriptFilter, ScriptTarget, build,
-    )
-
-    section, total, pre_block = _resolve_step_target(
-        spec, only_set, script_filter,
-    )
-    progress = max(1, args.script_step_progress or 1)
-    lo = pre_block.lo if pre_block is not None else 0
-    hi_cap = min(pre_block.hi, total - 1) if pre_block is not None else total - 1
-    if lo > hi_cap:
-        raise SystemExit(
-            f"error: --script-step: empty block range {lo}..{hi_cap}"
+    if args.no_progress:
+        reporter = None
+    else:
+        reporter = make_reporter(
+            animate=(None if args.progress is None else args.progress),
+            stream=sys.stderr,
         )
-    n_steps = ((hi_cap - lo) // progress) + 1
-    section_id = (
-        section.from_datadef
-        or section.attrs.get("name")
-        or section.attrs.get("alias")
-        or ""
-    )
-    if not section_id:
-        raise SystemExit(
-            f"error: --script-step: section {section.source!r} has no usable "
-            f"name; set [section.name] or use --only with a datadef name"
-        )
+
+    if args.script_step_batch:
+        namer = None  # use default <stem>.stepNNN<suffix>
+    else:
+        namer = lambda s, t, base: base  # noqa: E731 — overwrite same file
 
     print(
-        f"step mode: section={section_id!r} blocks={lo}..{hi_cap} "
-        f"({total} total) progress={progress} steps={n_steps}"
+        f"step mode: section="
+        f"{(section.from_datadef or section.attrs.get('name') or 'script')!r}"
+        f" blocks={block_lo}..{block_hi if block_hi is not None else int(section.count) - 1}"
+        f" progress={progress_per_step}"
+    )
+    print(
+        "mode: " + (
+            "batch (one ROM per step)"
+            if args.script_step_batch
+            else "interactive (Enter=advance, q=quit, j N=jump to step N)"
+        )
+    )
+
+    iterator = iter_step_builds(
+        spec,
+        section=section,
+        source_root=source_root,
+        out_path=out,
+        block_lo=block_lo,
+        block_hi=block_hi,
+        progress=progress_per_step,
+        extra_window_range=extra_window_range,
+        cache=cache,
+        only=only_set,
+        skip=skip_set,
+        parallel=resolved_jobs,
+        reporter=reporter,
+        output_namer=namer,
     )
     if args.script_step_batch:
-        print("mode: batch (writing one ROM per step)")
-    else:
-        print("mode: interactive (Enter=advance, q=quit, j N=jump to step N)")
-
-    step = 1
-    while step <= n_steps:
-        cur_hi = min(lo + step * progress - 1, hi_cap)
-        sf = ScriptFilter()
-        sf.add(ScriptTarget(
-            section_id=section_id,
-            block_range=IndexRange(lo, cur_hi),
-            window_range=(
-                pre_block_window_range(script_filter, section_id)
-                if not script_filter.is_empty() else None
-            ),
-        ))
-        if args.script_step_batch:
-            step_out = out.with_suffix("")
-            step_out = Path(f"{step_out}.step{step:03d}{out.suffix}")
-        else:
-            step_out = out
         with reporter or _NullCm():
-            result = build(
-                spec, source_root=source_root, out_path=step_out,
-                cache=cache, only=only_set, skip=skip_set,
-                parallel=parallel, reporter=reporter,
-                script_filter=sf,
+            for step, total, result, step_out in iterator:
+                print(
+                    f"step {step}/{total}  -> {step_out.name}  "
+                    f"({result.rom_size:,}b, {result.duration_ms} ms)"
+                )
+    else:
+        with reporter or _NullCm():
+            results = list(iterator)
+        cur = 1
+        n_steps = results[0][1] if results else 0
+        while cur <= n_steps:
+            step, total, result, step_out = results[cur - 1]
+            print(
+                f"step {step}/{total}  -> {step_out.name}  "
+                f"({result.rom_size:,}b, {result.duration_ms} ms)"
             )
-        print(
-            f"step {step}/{n_steps}  blocks {lo}..{cur_hi}  "
-            f"-> {step_out.name}  ({result.rom_size:,}b, "
-            f"{result.duration_ms} ms)"
-        )
-        if args.script_step_batch:
-            step += 1
-            continue
-        nxt = _step_prompt(step, n_steps)
-        if nxt is None:
-            print("aborted")
-            return 0
-        step = nxt
+            nxt = _step_prompt(step, total)
+            if nxt is None:
+                print("aborted")
+                return 0
+            if nxt > total:
+                break
+            # Re-run from `nxt` onwards (subsequent rebuilds reuse the
+            # already-computed iterator slice — but we built `results`
+            # eagerly above, so just advance the index).
+            cur = nxt
     return 0
 
 
-def pre_block_window_range(script_filter, section_id: str):
-    """If the user's --only included `:BLOCK:WIN-WIN`, surface that window
-    range so step mode can preserve it. Mirrors the block range carry-over."""
-    sec = section_id.lower()
-    rules = script_filter.targets_by_id.get(sec, [])
-    for r in rules:
-        if r.window_range is not None:
-            return r.window_range
-    return None
+class _NullCm:
+    """No-op context manager so the same `with` block handles both
+    progress-on and progress-off paths."""
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
 
 
 def _step_prompt(cur: int, total: int) -> Optional[int]:
@@ -446,108 +291,32 @@ def _step_prompt(cur: int, total: int) -> Optional[int]:
 
 
 def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
-    from retrotool.build import extract
-    spec, spec_file, finalize = _load_spec(
-        Path(args.path), defines=_parse_defines(args.define),
-        defer_datadefs=True,
-    )
-    source_root = spec_file.parent
-
-    # Resolve extract destination. Precedence:
-    #   --dest (absolute path, overrides everything)
-    #   --lang X  → spec.data_dirs_by_lang[X] is spliced into spec.en_data_dir
-    #              so DataDef file= auto-defaults land there.
-    #   [extract].default_lang in project.toml → same behavior as --lang.
-    #   Otherwise → error. Extract must be explicit; silent defaults have
-    #   clobbered translation files in the past.
-    dest = Path(args.dest).resolve() if args.dest else None
-    lang = args.lang
-    if not dest and not lang:
-        default_lang = spec.extract_config.get("default_lang")
-        if isinstance(default_lang, str) and default_lang:
-            lang = default_lang
-    if not dest and not lang:
-        sys.stderr.write(
-            "error: extract requires an explicit destination.\n"
-            "  pass --lang <code>  (resolved via `<code>_data_dir=` in project.toml)\n"
-            "  or --dest <path>    (absolute override)\n"
-            "  or set `[extract].default_lang = \"<code>\"` in the spec.\n"
-        )
-        return 2
-    if lang:
-        lang_key = lang.lower()
-        dir_ = spec.data_dirs_by_lang.get(lang_key)
-        if not dir_:
-            known = sorted(spec.data_dirs_by_lang.keys())
-            sys.stderr.write(
-                f"error: --lang {lang!r}: no `{lang_key}_data_dir=` scalar in "
-                f"project.toml (known langs: {known})\n"
-            )
-            return 2
-        # Splice the chosen lang dir in as the file-autodefault so all DataDef
-        # sections resolve under it.
-        spec.en_data_dir = dir_
-
-    # Resolve datadef sections now that en_data_dir reflects the chosen lang.
-    finalize()
-
-    confirm = _build_overwrite_confirmer(assume_yes=args.yes)
-
+    from retrotool.build import extract_project
     try:
-        result = extract(
-            spec, source_root=source_root, dest_root=dest,
-            only=_split_csv(args.only), skip=_split_csv(args.skip),
-            confirm_existing=confirm,
+        extract_project(
+            Path(args.path),
+            lang=args.lang,
+            dest=args.dest,
+            only=args.only,
+            skip=args.skip,
+            defines=args.define,
+            assume_yes=args.yes,
         )
-    except Exception as e:
-        # Abort from confirm callback surfaces as HandlerError; keep CLI terse.
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    except Exception as e:  # noqa: BLE001
+        # confirm-callback abort or handler error — keep CLI terse.
         sys.stderr.write(f"error: {e}\n")
         return 1
-    total = sum(s.bytes_read for s in result.sections)
-    print(f"sections:  {len(result.sections)}")
-    print(f"bytes:     {total}")
-    print(f"duration:  {result.duration_ms} ms")
     return 0
 
 
-def _build_overwrite_confirmer(*, assume_yes: bool):
-    """Return a `confirm_existing(paths) -> bool` for retrotool.build.extract.
-
-    `assume_yes`: bypass prompt (used by --yes/-y).
-    Non-interactive stdin: refuse overwrite (safe default for scripts/CI)."""
-    def _confirm(existing: list[Path]) -> bool:
-        if assume_yes:
-            return True
-        count = len(existing)
-        sys.stderr.write(
-            f"\nWARNING: extract would overwrite {count} existing file(s):\n"
-        )
-        preview = existing[:10]
-        for p in preview:
-            sys.stderr.write(f"  {p}\n")
-        if count > len(preview):
-            sys.stderr.write(f"  ... ({count - len(preview)} more)\n")
-        if not sys.stdin.isatty():
-            sys.stderr.write(
-                "stdin is not a TTY — refusing to overwrite. "
-                "Re-run with --yes to confirm.\n"
-            )
-            return False
-        sys.stderr.write("Proceed with overwrite? [y/N] ")
-        sys.stderr.flush()
-        reply = sys.stdin.readline().strip().lower()
-        return reply in ("y", "yes")
-    return _confirm
-
-
 def _cmd_mbuild_migrate(args: argparse.Namespace) -> int:
-    from retrotool.build import migrate_mbxml
-    path = Path(args.path)
-    if path.is_dir() or path.suffix.lower() not in (".mbxml", ".xml"):
-        raise ValueError("migrate requires an .mbxml/.xml file")
-    text = migrate_mbxml(path, in_place=args.in_place)
+    from retrotool.build import migrate_project
+    text = migrate_project(Path(args.path), in_place=args.in_place)
     if args.in_place:
-        print(f"migrated → {path} (backup: {path}.bak)")
+        print(f"migrated → {args.path} (backup: {args.path}.bak)")
     else:
         sys.stdout.write(text)
     return 0

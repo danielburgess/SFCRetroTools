@@ -1,6 +1,7 @@
 """retrotool — SNES/SFC ROM hacking toolkit."""
 from retrotool.core import (
     BuildCache,
+    Rom,
     RomHeader,
     SFCAddress,
     SFCAddressType,
@@ -17,6 +18,7 @@ __all__ = [
     "SFCAddress",
     "SFCAddressType",
     "SFCPointer",
+    "Rom",
     "RomHeader",
     "BuildCache",
     "ProjectConfig",
