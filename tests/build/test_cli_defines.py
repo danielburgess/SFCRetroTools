@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from retrotool.cli import _parse_defines, _load_spec
+from retrotool.build import parse_defines as _parse_defines
+from retrotool.build import load_spec as _load_spec
 
 
 def test_parse_defines_basic():
@@ -28,12 +29,12 @@ def test_parse_defines_none_returns_empty():
 
 
 def test_parse_defines_missing_equals_raises():
-    with pytest.raises(SystemExit, match="name=value"):
+    with pytest.raises(ValueError, match="name=value"):
         _parse_defines(["bogus"])
 
 
 def test_parse_defines_empty_name_raises():
-    with pytest.raises(SystemExit, match="non-empty name"):
+    with pytest.raises(ValueError, match="non-empty name"):
         _parse_defines(["=value"])
 
 

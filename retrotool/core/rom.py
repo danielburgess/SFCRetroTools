@@ -1,10 +1,11 @@
-"""ROM header detection, mapping-type inference, layout helpers."""
+"""ROM loader, header detection, mapping-type inference, layout helpers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
-from retrotool.core.address import SFCAddressType
+from retrotool.core.address import SFCAddress, SFCAddressType
 
 SMC_HEADER_SIZE = 512
 
@@ -49,6 +50,62 @@ class RomHeader:
     @property
     def rom_size_bytes(self) -> int:
         return 1 << self.rom_size_code if self.rom_size_code else 0
+
+
+class Rom:
+    """Loaded ROM. Auto-detects SMC header + mapping mode.
+
+    Use `Rom.load(path)` to read a `.sfc` / `.smc` file from disk; `data`
+    is the body with any 512-byte SMC copier header stripped, `smc_header`
+    holds the original copier bytes (or `None`), and `header` is the parsed
+    internal header (or `None` if no candidate scored above zero).
+
+    `read(pc, length)` is a raw PC-offset slice. `read_snes(addr, length)`
+    resolves an SNES bus address through the detected mapping mode (LoROM
+    / HiROM / ExHiROM) and reads from the corresponding PC offset; it
+    raises `ValueError` when the ROM has no detected header or the
+    address falls outside the mapping's valid range.
+    """
+
+    def __init__(
+        self,
+        data: bytes,
+        path: Optional[Path] = None,
+        smc_header: Optional[bytes] = None,
+        header: Optional[RomHeader] = None,
+    ):
+        self.data = data
+        self.path = path
+        self.smc_header = smc_header
+        self.header = header
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "Rom":
+        path = Path(path)
+        raw = path.read_bytes()
+        smc_header, body = _strip_smc_header(raw)
+        header = detect_header(body)
+        return cls(data=body, path=path, smc_header=smc_header, header=header)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def read(self, pc_offset: int, length: int) -> bytes:
+        return self.data[pc_offset:pc_offset + length]
+
+    def read_snes(self, snes_addr: int, length: int) -> bytes:
+        """Read by SNES address using ROM's mapping mode."""
+        if self.header is None:
+            raise ValueError("Cannot resolve SNES address: no header detected")
+        pc = SFCAddress(
+            snes_addr, self.header.address_type,
+        ).get_address(SFCAddressType.PC)
+        if pc is None:
+            raise ValueError(
+                f"Invalid SNES address for {self.header.mapping_name}: "
+                f"{snes_addr:#08X}"
+            )
+        return self.read(pc, length)
 
 
 def _strip_smc_header(raw: bytes) -> tuple[Optional[bytes], bytes]:

@@ -4,8 +4,13 @@ Old behavior zeroed (with 0xFF) the HiROM bank-$C0 first 32KB, discarding
 LoROM bank $00 contents. HiROM mirroring requires bank $C0 == LoROM $00."""
 from __future__ import annotations
 
+import pytest
+
+from retrotool import Rom as TopLevelRom
 from retrotool.core.address import SFCAddressType
-from retrotool.core.rom import detect_header, lorom_to_hirom
+from retrotool.core.rom import (
+    Rom, RomHeader, SMC_HEADER_SIZE, detect_header, lorom_to_hirom,
+)
 
 
 def _lorom_4_banks() -> bytes:
@@ -95,3 +100,80 @@ def test_detect_header_prefers_lorom_over_hirom_when_both_parse():
     h = detect_header(bytes(body))
     assert h is not None
     assert h.address_type == SFCAddressType.LOROM1
+
+
+# ---- Rom loader / read / read_snes ---------------------------------------
+
+
+def _planted_lorom(path, *, plant: dict[int, bytes] | None = None,
+                  smc: bool = False) -> bytes:
+    body = bytearray(0x80_000)
+    _write_lorom_header(body)
+    for off, payload in (plant or {}).items():
+        body[off:off + len(payload)] = payload
+    # Re-fold checksum after planting so detect_header still scores hi.
+    _write_lorom_header(body)
+    raw = (b"\x00" * SMC_HEADER_SIZE + bytes(body)) if smc else bytes(body)
+    path.write_bytes(raw)
+    return raw
+
+
+def test_rom_load_detects_header_and_strips_no_smc(tmp_path):
+    rom_path = tmp_path / "test.sfc"
+    _planted_lorom(rom_path)
+    rom = Rom.load(rom_path)
+    assert isinstance(rom, Rom)
+    assert isinstance(rom.header, RomHeader)
+    assert rom.header.mapping_name == "lorom"
+    assert rom.header.title.startswith("RETRO TEST")
+    assert rom.smc_header is None
+    assert rom.path == rom_path
+    assert len(rom) == 0x80_000
+
+
+def test_rom_load_strips_smc_header(tmp_path):
+    rom_path = tmp_path / "test.smc"
+    _planted_lorom(rom_path, smc=True)
+    rom = Rom.load(rom_path)
+    assert rom.smc_header is not None and len(rom.smc_header) == SMC_HEADER_SIZE
+    assert len(rom.data) == 0x80_000
+    assert rom.header is not None  # header still detectable post-strip
+
+
+def test_rom_read_returns_pc_slice(tmp_path):
+    rom_path = tmp_path / "test.sfc"
+    _planted_lorom(rom_path, plant={0x100: b"PC-OFFSET-MARK"})
+    rom = Rom.load(rom_path)
+    assert rom.read(0x100, 14) == b"PC-OFFSET-MARK"
+
+
+def test_rom_read_snes_resolves_through_mapping(tmp_path):
+    """LoROM bank $80 page $8000 → PC offset 0x000000; +0x100 → 0x100."""
+    rom_path = tmp_path / "test.sfc"
+    _planted_lorom(rom_path, plant={0x100: b"SNES-MAPPED!"})
+    rom = Rom.load(rom_path)
+    # LoROM bank 0 starts at SNES $00:8000 / $80:8000; offset 0x100 within.
+    assert rom.read_snes(0x80_8100, 12) == b"SNES-MAPPED!"
+
+
+def test_rom_read_snes_raises_without_header():
+    # Body too small for any header offset → detect_header returns None.
+    rom = Rom(data=b"\x00" * 0x100)
+    with pytest.raises(ValueError, match="no header detected"):
+        rom.read_snes(0x80_8000, 4)
+
+
+def test_rom_read_snes_raises_on_invalid_address(tmp_path):
+    rom_path = tmp_path / "test.sfc"
+    _planted_lorom(rom_path)
+    rom = Rom.load(rom_path)
+    # Hardware-area address ($00:0000-$00:7FFF for LoROM) doesn't map to ROM.
+    with pytest.raises(ValueError, match="Invalid SNES address"):
+        rom.read_snes(0x00_2000, 4)
+
+
+def test_top_level_rom_is_same_class():
+    """`from retrotool import Rom` must alias the same class as
+    `retrotool.core.rom.Rom` — guards against the public re-export
+    accidentally diverging again."""
+    assert TopLevelRom is Rom
