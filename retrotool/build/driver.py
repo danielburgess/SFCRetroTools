@@ -84,7 +84,7 @@ def _is_parallel_eligible(section: Section) -> bool:
     """
     if section.kind in _PARALLEL_KINDS:
         return True
-    if section.kind == SectionKind.ASAR and section.cache:
+    if section.kind in (SectionKind.ASAR, SectionKind.BASS) and section.cache:
         return True
     return False
 
@@ -108,12 +108,22 @@ _CACHEABLE_KINDS = frozenset({
     SectionKind.REP, SectionKind.INS, SectionKind.BIN,
     SectionKind.GRAPHICS, SectionKind.SCRIPT,
     SectionKind.FIXED_RECORDS, SectionKind.WINDOWED_SCRIPT,
+    # ca65 + ld65 are pure for a given (sources, includes, config, defines,
+    # cpu, debug, toolchain version) tuple — the linker output doesn't depend
+    # on prior-section ROM bytes (handler memcopies the linker output into
+    # the working ROM at `offset`). Cache by default; opt out per-section
+    # with cache="0" if a contributor uses ld65 features that read external
+    # state we don't track.
+    SectionKind.CA65,
 })
 
 # Kinds eligible for explicit opt-in (cache="1"). These need extra work to
 # cache safely — see handle_asar's diff-mode path for the asar story.
+# bass shares the same diff-mode wrapper (`_wrap_assembler_writes`), so
+# the same opt-in semantics apply.
 _OPT_IN_CACHEABLE_KINDS = frozenset({
     SectionKind.ASAR,
+    SectionKind.BASS,
 })
 
 # Bumped when the cache-key schema changes; old entries are ignored on read.
@@ -229,12 +239,25 @@ def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
         fpath = (files_root / Path(str(section.fallback_table))).resolve()
         if fpath.exists():
             parts.append(sha256_file(fpath).encode())
-    # ASAR opt-in: walk incsrc/incbin transitive deps and hash every file.
-    # The entry file is already hashed via `section.files` above, but deps
-    # aren't — this adds them. Also includes/defines are part of the key.
-    if section.kind == SectionKind.ASAR and section.cache:
-        from retrotool.build.asar_deps import scan_deps
+    # Assembler opt-in: walk transitive include/incbin deps and hash every
+    # file. The entry file is already hashed via `section.files` above, but
+    # deps aren't — this adds them. Also includes/defines/etc. are part of
+    # the key. asar and bass share the structure; the dialect picks the
+    # scanner and the attr keys we pin.
+    if section.kind in (SectionKind.ASAR, SectionKind.BASS) and section.cache:
+        from retrotool.build.asar_deps import scan_bass_deps, scan_deps
         raw = section.attrs
+        if section.kind == SectionKind.ASAR:
+            scanner = scan_deps
+            tag = "asar"
+            extra_attrs = ("includes", "defines", "allow-shrink")
+        else:
+            scanner = scan_bass_deps
+            tag = "bass"
+            extra_attrs = (
+                "includes", "defines", "constants",
+                "strict", "bass-cmd", "allow-shrink",
+            )
         include_dirs: list[Path] = []
         for p in (raw.get("includes") or "").split("|"):
             if p:
@@ -243,15 +266,85 @@ def _section_cache_key(section: Section, files_root: Path) -> Optional[str]:
             entry = (files_root / Path(str(fspec))).resolve()
             if not entry.exists():
                 continue
-            for dep in scan_deps(entry, include_dirs=include_dirs):
-                # `entry` itself is re-hashed here — cheap and keeps scan_deps
-                # self-contained (the caller doesn't need to skip deps[0]).
-                parts.append(f"asar_dep={dep}".encode())
+            for dep in scanner(entry, include_dirs=include_dirs):
+                # `entry` itself is re-hashed here — cheap and keeps the
+                # scanner self-contained (the caller doesn't need to skip
+                # deps[0]).
+                parts.append(f"{tag}_dep={dep}".encode())
                 parts.append(sha256_file(dep).encode())
-        # Pin the other asar-handler-visible attrs explicitly so trailing
-        # attr additions don't accidentally collide or invalidate.
-        for k in ("includes", "defines", "allow-shrink"):
-            parts.append(f"asar_attr_{k}={raw.get(k, '')}".encode())
+        # Pin the other handler-visible attrs explicitly so trailing attr
+        # additions don't accidentally collide or invalidate.
+        for k in extra_attrs:
+            parts.append(f"{tag}_attr_{k}={raw.get(k, '')}".encode())
+
+    # ca65 sections are deterministic on (sources, includes, config,
+    # defines, cpu, debug, toolchain version). Hash each input piece so
+    # editing any of them invalidates the cache.
+    if section.kind == SectionKind.CA65:
+        raw = section.attrs
+        # Linker config — required by the handler; if missing the cache
+        # still works because the handler raises before any write.
+        cfg = raw.get("config")
+        if cfg:
+            cfg_path = (files_root / Path(cfg)).resolve()
+            if cfg_path.exists():
+                parts.append(b"ca65_config=" + str(cfg_path).encode())
+                parts.append(sha256_file(cfg_path).encode())
+        # Multi-source list (additive to section.files).
+        extra = (raw.get("files") or "").strip()
+        if extra:
+            for f in extra.split("|"):
+                f = f.strip()
+                if not f:
+                    continue
+                p = (files_root / Path(f)).resolve()
+                if p.exists():
+                    parts.append(b"ca65_extra=" + str(p).encode())
+                    parts.append(sha256_file(p).encode())
+        # Transitive .include / .import scan against the entry source
+        # uses retrotool.asm.ca65._scan_includes, but that function only
+        # returns top-level includes (one level deep) — sufficient for
+        # our cache invalidation purposes since libSFX-style projects pin
+        # their include tree via the bundled wheel.
+        try:
+            from retrotool.asm.ca65 import _scan_includes  # type: ignore[attr-defined]
+        except ImportError:
+            _scan_includes = None  # type: ignore[assignment]
+        include_dirs: list[Path] = []
+        for p in (raw.get("includes") or "").split("|"):
+            if p:
+                include_dirs.append((files_root / Path(p)).resolve())
+        if _scan_includes is not None:
+            for fspec in section.files:
+                entry = (files_root / Path(str(fspec))).resolve()
+                if not entry.exists():
+                    continue
+                for inc in _scan_includes(entry, include_dirs):
+                    parts.append(b"ca65_inc=" + str(inc).encode())
+                    if inc.exists():
+                        parts.append(sha256_file(inc).encode())
+        # Pin every handler-visible attr so trailing attr additions don't
+        # collide silently with existing cache entries.
+        for k in (
+            "files", "config", "offset", "length", "pad-byte",
+            "includes", "defines", "cpu", "debug",
+            "lib-paths", "cfg-paths", "allow-truncate", "sym",
+        ):
+            parts.append(f"ca65_attr_{k}={raw.get(k, '')}".encode())
+        # Toolchain version pin — invalidate the cache when the bundled
+        # ca65/ld65 is upgraded. Best-effort: skip silently if the wheel
+        # isn't installed (the handler will fail at apply time anyway).
+        try:
+            from retrotool import _toolchain
+            parts.append(
+                f"ca65_ver={_toolchain.tool_version('ca65')}".encode()
+            )
+            parts.append(
+                f"ld65_ver={_toolchain.tool_version('ld65')}".encode()
+            )
+        except Exception:  # noqa: BLE001 — toolchain absent is fine here
+            pass
+
     return sha256_many(parts)
 
 

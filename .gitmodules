@@ -7,3 +7,6 @@
 [submodule "packages/retrotool-asar/vendor/asar"]
 	path = packages/retrotool-asar/vendor/asar
 	url = https://github.com/RPGHacker/asar
+[submodule "packages/retrotool-bass/vendor/bass"]
+	path = packages/retrotool-bass/vendor/bass
+	url = https://github.com/ARM9/bass

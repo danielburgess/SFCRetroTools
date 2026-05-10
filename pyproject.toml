@@ -1,7 +1,7 @@
 [project]
 name = "retrotool"
 version = "0.9.0"
-description = "SNES/SFC ROM hacking toolkit — address math, compression, script, debugger IPC, asar, Godot/Tiled export"
+description = "SNES/SFC ROM hacking toolkit — address math, compression, script, debugger IPC, asar/bass, Godot/Tiled export"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
 license = {file = "LICENSE"}
@@ -30,12 +30,16 @@ dependencies = [
 libsfx = ["retrotool-libsfx>=0.1.0"]
 # asar — SNES assembler (LGPL-3.0-or-later binary bundled in the wheel).
 asar = ["retrotool-asar>=0.1.0"]
+# bass — bass v18 (ARM9 fork) multi-architecture assembler (ISC binary
+# bundled, with `architectures/*.arch` next to it for runtime lookup).
+bass = ["retrotool-bass>=0.1.0"]
 # xdelta — binary delta patcher (Apache-2.0 binary bundled in the wheel).
 xdelta = ["retrotool-xdelta>=0.1.0"]
 # all — every bundled-binary wheel at once.
 all = [
     "retrotool-libsfx>=0.1.0",
     "retrotool-asar>=0.1.0",
+    "retrotool-bass>=0.1.0",
     "retrotool-xdelta>=0.1.0",
 ]
 
