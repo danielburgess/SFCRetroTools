@@ -1,15 +1,25 @@
 # retrotool
 
-**SNES/SFC ROM hacking toolkit** — v0.8.2
+**SNES/SFC ROM hacking *and* development toolkit** — v0.8.2
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
 compression (LZSS + RLE), script dumping/insertion, pointer-table heuristics, [Mesen2-Diz](https://github.com/danielburgess/Mesen2-Diz)
-debugger IPC, asar patching, and Godot/Tiled/C++/Python export emitters.
+debugger IPC, asar/bass/ca65 patching + linking, libSFX-driven from-scratch ROM builds, and
+Godot/Tiled/C++/Python export emitters.
 
-Built with automation and streamlined romhacking in mind — primarily targeting SNES/SFC work,
-wiring static analysis, live debugger IPC, patch builds, and asset export into a single
-scriptable pipeline instead of a pile of one-off tools.
+Built with automation in mind for **both directions** of SNES/SFC work:
+
+- **Romhacking** — extract assets and scripts from existing ROMs, edit them, re-insert with
+  byte-exact builds, diff against the original (IPS / xdelta), bisect translation regressions
+  with `--only NAME:BLOCK` and step-mode rebuilds.
+- **Original development** — author new SNES games from scratch via the bundled libSFX
+  toolchain (ca65/ld65 + SuperFamiconv + BRRtools + lz4), drive complete project builds with
+  `retrotool libsfx build`, mix-and-match assemblers per section (asar, bass, ca65), apply
+  asar patches on top of a libSFX canvas, debug live via Mesen2-Diz IPC.
+
+Static analysis, live debugger IPC, patch builds, asset export, and from-scratch assembly all
+wire into a single scriptable pipeline instead of a pile of one-off tools.
 
 v0.8 is the first published version of the post-rewrite scope. The 0.1 line (address-only)
 still works through compatibility shims; 1.0 will land after examples + CLI + test suite.

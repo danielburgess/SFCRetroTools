@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 from retrotool.compression.base import Codec
+from retrotool.compression.lc_lz2 import LCLZ2Codec, LCLZ2Params
 from retrotool.compression.lzss import (
     LZSSCodec,
     LZSSParams,
@@ -48,4 +49,5 @@ register("lzss", _lzss_factory)
 register("lzss-rbshura", lambda _: LZSSCodec(PARAMS_RBSHURA))
 register("lzss-zamn", lambda _: LZSSCodec(PARAMS_ZAMN))
 register("lzss-legacy", lambda _: LZSSCodec(PARAMS_LEGACY))
+register("lc-lz2", lambda _: LCLZ2Codec())
 register("rle", _rle_factory)
