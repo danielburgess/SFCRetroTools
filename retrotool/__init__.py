@@ -1,4 +1,4 @@
-"""retrotool — SNES/SFC ROM hacking toolkit."""
+"""retrotool — SNES/SFC ROM hacking and development toolkit."""
 from retrotool.core import (
     BuildCache,
     Rom,

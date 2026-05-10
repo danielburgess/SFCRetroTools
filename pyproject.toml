@@ -1,7 +1,7 @@
 [project]
 name = "retrotool"
 version = "0.9.0"
-description = "SNES/SFC ROM hacking toolkit — address math, compression, script, debugger IPC, asar/bass, Godot/Tiled export"
+description = "SNES/SFC ROM hacking and development toolkit — address math, compression, script, debugger IPC, asar/bass/ca65, libSFX project builds, Godot/Tiled export"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
 license = {file = "LICENSE"}

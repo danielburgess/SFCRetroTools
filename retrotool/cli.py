@@ -323,7 +323,10 @@ def _cmd_mbuild_migrate(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="retrotool", description="SNES ROM hacking toolkit")
+    p = argparse.ArgumentParser(
+        prog="retrotool",
+        description="SNES/SFC ROM hacking and development toolkit",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # build
