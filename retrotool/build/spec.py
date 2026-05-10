@@ -32,6 +32,8 @@ class SectionKind(str, Enum):
     # retrotool extensions
     BIN = "bin"
     ASAR = "asar"
+    BASS = "bass"
+    CA65 = "ca65"
     GRAPHICS = "graphics"
     SCRIPT = "script"
     PROJECT = "project"
@@ -42,8 +44,9 @@ class SectionKind(str, Enum):
     @property
     def operation(self) -> str:
         last = self.value[-1]
-        if self.value in ("bin", "asar", "graphics", "script", "project",
-                          "libsfx", "fixed-records", "windowed-script"):
+        if self.value in ("bin", "asar", "bass", "ca65", "graphics", "script",
+                          "project", "libsfx", "fixed-records",
+                          "windowed-script"):
             return OP_REPLACE  # default; actual behavior handler-specific
         return OP_INSERT if last == "i" else OP_REPLACE
 

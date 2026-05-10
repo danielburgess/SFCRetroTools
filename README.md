@@ -22,13 +22,17 @@ pip install retrotool
 
 Requires Python 3.12+ (uses stdlib `tomllib`).
 
-The `retrotool[libsfx]` extra (0.9.0+) bundles the full Optiroc SNES toolchain —
-libSFX runtime, ca65/ld65, SuperFamiconv, SuperFamicheck, BRRtools, lz4,
-`make_breakpoints` — as a single wheel with prebuilt binaries per platform.
-retrotool drives a complete libSFX build end-to-end with no external toolchain
-install, and you can pick either ca65 (via libsfx) or asar (existing) as the
-assembler on a per-project basis. See [libSFX assembly projects](#libsfx-assembly-projects)
-below, and [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough.
+Optional **bundled-binary extras** ship the third-party tools retrotool drives, so users don't have to chase system installs:
+
+```
+pip install retrotool[asar]      # asar patcher (LGPL-3.0+ binary)
+pip install retrotool[bass]      # bass v18 ARM9 fork (ISC binary + arch tables)
+pip install retrotool[libsfx]    # full Optiroc toolchain (ca65/ld65/SuperFamiconv/…)
+pip install retrotool[xdelta]    # xdelta3 binary delta tool
+pip install retrotool[all]       # every bundled wheel at once
+```
+
+retrotool drives a complete libSFX build end-to-end with no external toolchain install. The assembler is selectable per project: ca65 (via `libsfx`), asar (`kind="asar"`), or bass v18 (`kind="bass"`). See [libSFX assembly projects](#libsfx-assembly-projects) below and [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough.
 
 ### Library-or-CLI, your call
 
@@ -481,6 +485,10 @@ Assembly patching + codegen.
 - `AsmBuilder` — fluent builder: `.label().instr().db().comment().render()`.
 - `AsarPatch(asm_file, includes=..., defines=...)` + `apply_patch(rom, patch, out, cache=)` —
   shells out to the `asar` binary, skips work when cache key matches.
+- `BassPatch(asm_file, includes=..., defines=..., constants=..., strict=False)` +
+  `apply_bass_patch(rom, patch, out, cache=, bass_cmd="bass")` — bass v18 (ARM9 fork)
+  equivalent. Uses `bass -m <out>` modify-mode for asar-equivalent in-place patching.
+  Same `BuildCache` integration; defines map to `-d`, constants to `-c`.
 - `FreeSpace(regions)` — `.allocate(length, align, tag)` with coalescing and used/free
   bookkeeping; use it to lay out data/code placements before emitting `org` directives.
 - `templates.hook_jsl / redirect_pointer_table / freespace_block / data_block` — string
@@ -883,6 +891,83 @@ result = apply_patch(
 )
 print("cache hit" if result.cache_hit else "rebuilt", result.ok)
 ```
+
+### Apply a bass v18 patch with caching
+
+bass (the ARM9 fork, [github.com/ARM9/bass](https://github.com/ARM9/bass)) is supported as an alternative assembler with the same `BuildCache` integration as asar. Use `kind="bass"` on a `[[rom.build.sections]]` entry, or call `apply_bass_patch` directly:
+
+```python
+from pathlib import Path
+from retrotool import BuildCache
+from retrotool.asm import BassPatch, apply_bass_patch
+
+cache = BuildCache(".cache")
+result = apply_bass_patch(
+    rom=Path("lm3.sfc"),
+    patch=BassPatch(asm_file=Path("patches/main.asm"),
+                    defines={"VERSION": "english"},
+                    constants={"COUNT": "0x40"},
+                    strict=True),
+    out=Path("out/lm3.patched.sfc"),
+    cache=cache,
+)
+print("cache hit" if result.cache_hit else "rebuilt", result.ok)
+```
+
+Resolution order (caller-given path → bundled `retrotool-bass` wheel if installed → system `bass` on PATH) mirrors asar. The wrapper invokes bass in **modify mode** (`bass -m <out> ...`) so the assembler patches the working ROM in place — the asar-equivalent semantic. Defines pass through `-d`, constants through `-c`, and `strict=True` toggles `-strict` (warnings become errors).
+
+### Assemble a ca65 source and overlay it (`<ca65>`)
+
+`retrotool[libsfx]` bundles the cc65 toolchain (ca65/ld65/cc65/...). The `<ca65>` section assembles one or more `.s` sources, links them through ld65 against a `Map.cfg`, and overlays the linker output into the working ROM at `offset=`. Same shape as `<asar>` / `<bass>`, but a two-stage assemble→link pipeline instead of an in-place patcher.
+
+```toml
+# project.toml
+[[rom.build.sections]]
+kind = "ca65"
+file = "patches/hook.s"           # or files = "a.s|b.s|c.s" for multi-source
+config = "patches/hook.cfg"        # ld65 linker config (Map.cfg-style)
+offset = 0x10000                   # PC where the linker output lands
+length = 0x100                     # optional cap (pads short, errors on overflow)
+pad-byte = 0xFF                    # fill byte when length > linker output
+defines = "DEBUG=1|VER=en"         # ca65 -D pairs
+includes = "patches/include"       # ca65 -I paths
+cpu = "65816"                      # ca65 --cpu (default "65816")
+debug = 2                          # 0..3; emits .sym/.map/.dbg next to ROM
+```
+
+A minimal `Map.cfg` for a 256-byte fixed-offset blob:
+
+```
+MEMORY {
+    CODE: start=$0000, size=$100, type=ro, fill=yes, fillval=$00;
+}
+SEGMENTS {
+    CODE:  load=CODE, type=ro, optional=no;
+}
+```
+
+Equivalent Python:
+
+```python
+from pathlib import Path
+from retrotool.asm import Ca65Assembler, Ld65Linker
+from retrotool import BuildCache
+
+cache = BuildCache(".cache")
+asm = Ca65Assembler(
+    include_dirs=[Path("patches/include")],
+    defines={"DEBUG": "1", "VER": "en"},
+    cpu="65816",
+    cache=cache,
+)
+asm.assemble(Path("patches/hook.s"), Path("build/hook.o"))
+
+linker = Ld65Linker(config=Path("patches/hook.cfg"), debug_level=2)
+result = linker.link([Path("build/hook.o")], Path("build/hook.bin"))
+# `result.rom` is the linker output; copy into the working ROM at offset.
+```
+
+`<ca65>` is in `_CACHEABLE_KINDS` by default — the linker output is a deterministic function of source bytes + `.include`/`.import` deps + config + defines + cpu + debug + ca65/ld65 versions. Disable per-section with `cache="0"` if you wire ld65 features that read external state.
 
 ### Emit Godot / Tiled assets
 
