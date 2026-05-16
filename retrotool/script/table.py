@@ -149,6 +149,20 @@ class Table:
                     if len(parts) == 2:
                         val, ch = parts
                         ch = ch.replace('\n', '').replace('\r', '').replace('\\n', '\n')
+                        # PuttScript-style `.tbl` files use `%%` as the primary
+                        # wildcard (retrotool's native syntax uses `**` primary
+                        # + `%%` secondary). Normalize to retrotool's form so
+                        # the rest of the parser handles both styles. Only
+                        # touch lines where `**` is absent; if both `**` and
+                        # `%%` are already present, the user is on retrotool's
+                        # two-wildcard syntax and we leave it alone.
+                        if '%%' in val and '**' not in val:
+                            # `%%%%` (4 percents) is PuttScript's "two
+                            # consecutive wildcards = a 2-byte position".
+                            # Map to retrotool's `**%%` (primary + secondary).
+                            # `%%` (2 percents) is a single 1-byte wildcard.
+                            val = val.replace('%%%%', '**\x00').replace('%%', '**').replace('\x00', '%%')
+                            ch = ch.replace('%%%%', '**\x00').replace('%%', '**').replace('\x00', '%%')
                         if '**' in val:
                             self._expand_wildcards(
                                 val, ch, val_map, char_map, char_bytes,
@@ -366,9 +380,22 @@ class Table:
                 val = self.bytes_to_val(bin_data[i:i + length], True)
                 char = self.get_chars(val, False)
                 if char:
-                    found = True
-                    i += (length - 1)
-                    break
+                    # Guard against length-mismatch matches: when the
+                    # current window starts with one or more 0x00 bytes,
+                    # bytes_to_val collapses them into a smaller integer
+                    # that can collide with a shorter real entry (e.g.
+                    # `[0x00, 0x39]` → val 0x39, which would falsely
+                    # match the 1-byte `0x39='r'` entry and silently
+                    # drop the leading 0x00). Reject the match when the
+                    # actual byte width of the matched character (from
+                    # char_bytes) differs from the window length.
+                    cb = self.__chr_bytes.get(char)
+                    if cb is not None and len(cb) != length:
+                        char = None
+                    else:
+                        found = True
+                        i += (length - 1)
+                        break
                 length -= 1
             if not found:
                 char = self.get_chars(bin_data[i], True)
@@ -423,9 +450,12 @@ class Table:
         return 0, None
 
     def find_entry_end(self, bin_data, start: int, max_bytes: int = 3,
-                       max_addr: Optional[int] = None) -> int:
-        """Left-to-right decode to find terminating $00. Uses @ctrl lengths so
-        parameter bytes inside FF sequences aren't mistaken for terminators."""
+                       max_addr: Optional[int] = None,
+                       terminator: int = 0x00) -> int:
+        """Left-to-right decode to find the entry terminator. Uses @ctrl lengths
+        so parameter bytes inside control-code sequences aren't mistaken for
+        terminators. `terminator` defaults to $00 but can be set to any byte
+        value for games that terminate strings with a different sentinel."""
         ctrl = self.__ctrl_lengths
         prefix = self.__ctrl_prefix
         i = start
@@ -442,7 +472,9 @@ class Table:
                 if i + size > len(bin_data):
                     continue
                 window = list(bin_data[i:i + size])
-                if size > 1 and window[-1] == 0xFF:
+                # Don't fold the ctrl prefix into a multi-byte char — its
+                # role belongs to the next ctrl sequence, not this entry.
+                if size > 1 and window[-1] == prefix:
                     continue
                 val = self.bytes_to_val(window, True)
                 if self.byte_size(val) != size:
@@ -452,7 +484,7 @@ class Table:
                     matched = True
                     break
             if not matched:
-                if bin_data[i] == 0x00:
+                if bin_data[i] == terminator:
                     return i + 1
                 i += 1
         return i
@@ -516,27 +548,55 @@ class Table:
     # ------------------------------------------------------------------
     # v2 additions
 
-    def encode_text(self, text: str, max_token_len: int = 4) -> bytes:
-        """Longest-match encode text → bytes. Honors [HH] hex literals."""
+    def encode_text(self, text: str, max_token_len: Optional[int] = None) -> bytes:
+        """Longest-match encode text → bytes. Honors `[HH]` hex literals.
+
+        `max_token_len` defaults to the longest text key declared in the
+        table (`self.max_key_len`). Capped at 4 unless the table actually
+        declares longer multi-character tokens, so simple tables don't pay
+        for an O(n*max_key_len) scan when nothing in the table needs it.
+
+        Multi-byte values (>3 bytes — e.g. a `FD1F...FD42=...` pluck
+        sequence) are emitted byte-faithfully via `char_bytes`, which
+        preserves the declared hex-code byte width even where the integer
+        representation would need more than 3 bytes.
+        """
+        if max_token_len is None:
+            max_token_len = max(self.max_key_len, 4)
         out = bytearray()
         i = 0
         n = len(text)
+        char_bytes = self.char_bytes
+        char_map = self.char_map
         while i < n:
             if text[i] == '[':
                 end = text.find(']', i)
                 if end == -1:
                     raise ValueError(f"Unterminated [ at pos {i}")
                 token = text[i:end + 1]
-                val = self.get_value(token, infer_value=True)
-                if val is None:
-                    raise ValueError(f"Unknown token {token!r} at pos {i}")
-                _emit_value(out, val)
+                # Prefer char_bytes for byte-faithful emission of declared
+                # tokens (handles >3-byte sequences). Fall back to int via
+                # get_value+_emit_value for inferred [HH] hex literals.
+                cb = char_bytes.get(token)
+                if cb is not None:
+                    out.extend(cb)
+                else:
+                    val = self.get_value(token, infer_value=True)
+                    if val is None:
+                        raise ValueError(f"Unknown token {token!r} at pos {i}")
+                    _emit_value(out, val)
                 i = end + 1
                 continue
             matched = False
             for plen in range(min(max_token_len, n - i), 0, -1):
                 candidate = text[i:i + plen]
-                val = self.char_map.get(candidate)
+                cb = char_bytes.get(candidate)
+                if cb is not None:
+                    out.extend(cb)
+                    i += plen
+                    matched = True
+                    break
+                val = char_map.get(candidate)
                 if val is not None:
                     _emit_value(out, val)
                     i += plen
@@ -548,7 +608,12 @@ class Table:
 
 
 def _emit_value(out: bytearray, val: int) -> None:
-    """Emit big-endian representation of a multi-byte table value."""
+    """Emit big-endian representation of a multi-byte integer value.
+
+    Capped at 3 bytes by historical table convention. For values larger
+    than 3 bytes (declared via long hex codes like `FD1FFD43...`), the
+    encoder reaches `char_bytes` directly instead of routing through int.
+    """
     if val <= 0xFF:
         out.append(val)
     elif val <= 0xFFFF:

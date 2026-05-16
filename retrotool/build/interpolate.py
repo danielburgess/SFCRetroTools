@@ -70,11 +70,18 @@ def build_vars(
 
     User defines override built-ins on conflict — that's what enables
     `-D version=en` to swap a default `version="ja"` from the file.
+
+    Every scalar attr declared on `<build>` (or `[rom.build]`) becomes an
+    interpolation variable, so projects can declare custom defaults like
+    `lang = "en"` and reference them as `${lang}` in section attrs without
+    needing to pass `-D lang=en` on every invocation. Non-scalar attrs
+    (lists/tables) are skipped — only `str | int | bool` are stringifiable
+    in a way that `${var}` substitution does anything meaningful with.
     """
     vars: dict[str, str] = {}
-    for k in ("name", "version", "revision"):
-        if k in build_attrs:
-            vars[k] = build_attrs[k]
+    for k, v in build_attrs.items():
+        if isinstance(v, (str, int, bool)):
+            vars[k] = str(v)
     if defines:
         vars.update(defines)
     return vars
