@@ -110,6 +110,14 @@ class Section:
     attrs: dict[str, str] = field(default_factory=dict)
     # front-end provenance (file:line if known)
     source: Optional[str] = None
+    # ROM address-mapping type (`SFCAddressType` integer) used for any
+    # SNES↔PC conversion this section performs. Populated by the build/
+    # extract driver from `BuildSpec.address_type()` immediately before
+    # the handler runs, so every handler sees a concrete value rather
+    # than having to reach back to the spec. `None` means the driver
+    # hasn't filled it yet; handlers that need the mapping should fall
+    # back to `SFCAddressType.LOROM1` to preserve historical behavior.
+    address_type: Optional[int] = None
     # Set when the parser auto-migrated a MBuild 1.29 legacy element
     # (e.g. <lzr> → kind=BIN, original_kind=LZR). None for native-form sections.
     original_kind: Optional["SectionKind"] = None
@@ -185,6 +193,27 @@ class BuildSpec:
     # default (currently 1, serial). `0` is interpreted as "auto" and
     # resolves to os.cpu_count() at run time. CLI `-j` always wins.
     jobs: Optional[int] = None
+    # ROM address-mapping mode parsed from `[rom].mapping`. Drives all
+    # SNES↔PC conversions in the build/extract pipeline. `None` means the
+    # spec didn't declare one; downstream code falls back to LoROM for
+    # backward compatibility with specs predating multi-mapping support.
+    # Valid values match `project.schema._MAPPING_TO_ADDR_TYPE`: "lorom",
+    # "lorom1", "lorom2", "hirom", "exlorom", "exhirom", "sa1".
+    mapping: Optional[str] = None
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)
+
+    def address_type(self) -> int:
+        """Resolve `mapping` to an `SFCAddressType` integer ID.
+
+        Falls back to `LOROM1` when no mapping was declared, preserving
+        the original LoROM-only behavior of the build pipeline. Callers
+        in the conversion path should always go through this rather than
+        hardcoding a specific `SFCAddressType.*` constant.
+        """
+        from retrotool.core.address import SFCAddressType
+        from retrotool.project.schema import mapping_to_address_type
+        if not self.mapping:
+            return SFCAddressType.LOROM1
+        return mapping_to_address_type(self.mapping)

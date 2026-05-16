@@ -42,11 +42,17 @@ def extract_script(
     data_start_pc = _to_pc(datadef.data.offset, address_type)
     data_end_pc = _to_pc(datadef.data.end, address_type) if datadef.data.end else len(rom)
 
-    # When the table declares @ctrl sequences, defer to Table.find_entry_end —
-    # it walks ctrl_lengths so parameter bytes equal to `terminator` don't
-    # prematurely cut the entry off. Tables without @ctrl keep the simple
-    # byte-walk via _read_until.
-    use_ctrl_walk = bool(getattr(table, "ctrl_lengths", None))
+    # When the table declares any @ctrl_prefix bytes (single- or multi-),
+    # defer to Table.find_entry_end — it walks each prefix's per-cmd length
+    # so parameter bytes equal to `terminator` don't prematurely cut the
+    # entry off. Tables without any @ctrl_prefix declaration keep the
+    # simple byte-walk via _read_until.
+    #
+    # Gating on `ctrl_prefixes` (not `ctrl_lengths`) is needed for
+    # multi-prefix tables that declare prefix-default lengths but no
+    # per-cmd overrides — those have empty per-prefix `cmds` dicts and
+    # would falsely report `bool(ctrl_lengths) == False`.
+    use_ctrl_walk = bool(getattr(table, "ctrl_prefixes", None))
 
     entries: list[ScriptEntry] = []
     for i in range(ptrs.count):
