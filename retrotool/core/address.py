@@ -270,14 +270,39 @@ class SFCAddress:
     @classmethod
     @lru_cache(0xFFFFFF)
     def hirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
+        """Convert any valid HiROM SNES address (including mirror regions)
+        to its ROM file PC offset.
+
+        HiROM exposes ROM in four overlapping ranges, all of which map to
+        the same PC bytes:
+        - $C0-$FF:$0000-$FFFF — canonical full-bank ROM (4 MB total).
+        - $40-$7D:$0000-$FFFF — mirror of $C0-$FF (slow-bus copy).
+        - $00-$3F:$8000-$FFFF — upper-half mirror (lower half is WRAM/IO/SRAM).
+        - $80-$BF:$8000-$FFFF — fast-rom upper-half mirror (lower half = same).
+
+        Lower-half writes in $00-$3F / $80-$BF target WRAM/IO/SRAM, not
+        ROM, so those are rejected — caller has either a bug or a non-ROM
+        address. PC formula in every ROM region: `(bank & 0x3F) << 16 |
+        offset` — the mask folds $C0-$FF / $80-$BF / $40-$7D / $00-$3F
+        into a 0-63 PC bank (same ROM byte across all four mirror ranges).
+        """
         if snes_addr is None:
             if verbose:
                 print("hirom_to_pc: Given Address is invalid.")
             return None
-        if not (0xC00000 <= snes_addr <= 0xFFFFFF):
-            print("Invalid HiROM Address!")
+        bank = (snes_addr >> 16) & 0xFF
+        offset = snes_addr & 0xFFFF
+        in_rom = (
+            (0xC0 <= bank <= 0xFF)
+            or (0x40 <= bank <= 0x7D)
+            or (bank <= 0x3F and offset >= 0x8000)
+            or (0x80 <= bank <= 0xBF and offset >= 0x8000)
+        )
+        if not in_rom:
+            if verbose:
+                print(f"Invalid HiROM Address: ${bank:02X}:{offset:04X}")
             return None
-        return snes_addr & 0x3FFFFF
+        return ((bank & 0x3F) << 16) | offset
 
     @classmethod
     @lru_cache(0xFFFFFF)

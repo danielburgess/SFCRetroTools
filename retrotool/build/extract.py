@@ -228,7 +228,23 @@ def _extract_script_pointer_table(
             f"{section.source}: pointer-size must be 2 or 3, got {ptr_size}"
         )
 
-    ptr_tbl_pc = section.pointer_table
+    # Address-mapping type: `section.address_type` is set by the driver
+    # from `BuildSpec.address_type()`. Fall back to LOROM1 for callers
+    # that drive a handler directly without going through `extract()`.
+    addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
+
+    # `section.pointer_table` can come in two shapes depending on the
+    # section's provenance:
+    #   - DataDef-derived: `pointers.offset` was a SNES address in TOML
+    #     (e.g. `$8586E4`), passed through `parse_snes_addr` as an int.
+    #     Needs SNES→PC conversion under the spec's mapping.
+    #   - Inline MBXML / legacy: the value is already a PC offset.
+    # We try SNES first; if that yields None (the int doesn't resolve in
+    # SNES space under this mapping), fall back to PC interpretation —
+    # preserves the historical behavior of the build pipeline.
+    ptr_tbl_pc_raw = section.pointer_table
+    converted = SFCAddress(ptr_tbl_pc_raw, addr_type).get_address(SFCAddressType.PC)
+    ptr_tbl_pc = converted if converted is not None else ptr_tbl_pc_raw
     count = int(section.count)
     ptr_tbl_len = count * ptr_size
     if ptr_tbl_pc + ptr_tbl_len > len(rom):
@@ -237,10 +253,14 @@ def _extract_script_pointer_table(
             f"{ptr_tbl_pc:#x} exceeds ROM size {len(rom):#x}"
         )
 
-    bank_hi = (
-        SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
-        if ptr_size == 2 else 0
-    )
+    # Bank byte for 2-byte pointers: take the bank of the SNES address
+    # whose PC equals ptr_tbl_pc under the active mapping. For 3-byte
+    # pointers each entry carries its own bank so this isn't needed.
+    if ptr_size == 2:
+        bank_hi = SFCAddress(ptr_tbl_pc, SFCAddressType.PC).get_bank_byte(addr_type)
+    else:
+        bank_hi = 0
+
     ptr_bytes = bytes(rom[ptr_tbl_pc:ptr_tbl_pc + ptr_tbl_len])
 
     # First pass: decode every ptr → per-index PC (None for sentinels).
@@ -251,19 +271,24 @@ def _extract_script_pointer_table(
             snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
         else:
             snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
-        pcs.append(SFCAddress.lorom1_to_pc(snes, verbose=False))
+        pcs.append(SFCAddress(snes, addr_type).get_address(SFCAddressType.PC))
 
     # Entry boundaries come from the ptr table itself: each entry runs
     # from its PC up to the next unique PC (primary bound). Within that
     # window `find_entry_end` serves as a secondary early-stop for
-    # 0x00-terminated entries whose real end is before the next ptr.
+    # terminator-bounded entries whose real end is before the next ptr.
     # Without the primary bound, entries ending in FFC0 redirects (no
-    # trailing 0x00) cause `find_entry_end` to walk into subsequent
+    # trailing terminator) cause `find_entry_end` to walk into subsequent
     # entries' bytes — swallowing multiple entries into one.
     sorted_unique = sorted({pc for pc in pcs if pc is not None})
     next_bound: dict[int, int] = {}
     for idx, pc in enumerate(sorted_unique):
         next_bound[pc] = sorted_unique[idx + 1] if idx + 1 < len(sorted_unique) else len(rom)
+
+    # Terminator: pulled from `[encoding].terminator` (default 0x00) on
+    # the datadef. Threaded to `find_entry_end` so games like rbshura
+    # (terminator=0xFF) don't truncate strings at literal $00 bytes.
+    terminator = section.terminator if section.terminator is not None else 0x00
 
     lines: list[str] = []
     bytes_read = ptr_tbl_len
@@ -274,9 +299,11 @@ def _extract_script_pointer_table(
             lines.append("")
             continue
         bound = next_bound[pc]
-        soft_end = table.find_entry_end(rom, pc)
+        soft_end = table.find_entry_end(rom, pc, max_addr=bound, terminator=terminator)
         end = min(soft_end, bound)
-        decoded = table.interpret_binary_data(list(rom[pc:end]))
+        decoded = table.interpret_binary_data(
+            list(rom[pc:end]), trim_bytes=[terminator],
+        )
         lines.append(f"<<${ptr_tbl_pc}:{i}[${pc}]>>")
         lines.append(decoded)
         bytes_read += (end - pc)
@@ -428,6 +455,14 @@ def extract(
             raise HandlerError(
                 f"extract aborted: {len(existing)} existing file(s) would be overwritten"
             )
+
+    # Stamp every section with the spec's address-mapping type before
+    # invoking handlers — so pointer-table and SNES-address conversions
+    # downstream don't have to reach back to the spec object.
+    spec_addr_type = spec.address_type()
+    for section in planned:
+        if section.address_type is None:
+            section.address_type = spec_addr_type
 
     results: list[ExtractedSection] = []
     for section in planned:

@@ -239,6 +239,17 @@ def parse_project_toml_dict(
     if isinstance(rom.get("file"), str):
         original = _coerce_path(rom["file"], "[rom].file")
 
+    # ROM mapping comes from [rom].mapping. Validated here so the spec
+    # carries a known-good string downstream; resolution to an
+    # `SFCAddressType` integer happens lazily via `spec.address_type()`.
+    rom_mapping = rom.get("mapping")
+    if rom_mapping is not None:
+        if not isinstance(rom_mapping, str):
+            raise SchemaError("[rom].mapping must be a string")
+        # Trigger validation now so a bad mapping fails fast at parse time.
+        from retrotool.project.schema import mapping_to_address_type
+        mapping_to_address_type(rom_mapping)
+
     spec = BuildSpec(
         original=original,
         name=rom.get("name"),
@@ -252,6 +263,7 @@ def parse_project_toml_dict(
         source_path=PurePosixPath(source_path.as_posix()) if source_path else None,
         vars=vars,
         jobs=_coerce_jobs(mb.get("jobs"), "[rom.build].jobs"),
+        mapping=rom_mapping,
     )
 
     fs = mb.get("freespace", [])
