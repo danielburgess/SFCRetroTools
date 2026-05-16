@@ -42,6 +42,12 @@ def extract_script(
     data_start_pc = _to_pc(datadef.data.offset, address_type)
     data_end_pc = _to_pc(datadef.data.end, address_type) if datadef.data.end else len(rom)
 
+    # When the table declares @ctrl sequences, defer to Table.find_entry_end —
+    # it walks ctrl_lengths so parameter bytes equal to `terminator` don't
+    # prematurely cut the entry off. Tables without @ctrl keep the simple
+    # byte-walk via _read_until.
+    use_ctrl_walk = bool(getattr(table, "ctrl_lengths", None))
+
     entries: list[ScriptEntry] = []
     for i in range(ptrs.count):
         p_off = ptr_pc + i * ptrs.size
@@ -54,7 +60,13 @@ def extract_script(
         data_pc = _to_pc(snes, address_type)
         if data_pc < data_start_pc or data_pc >= data_end_pc:
             continue
-        raw = _read_until(rom, data_pc, terminator, data_end_pc)
+        if use_ctrl_walk:
+            end_pc = table.find_entry_end(
+                rom, data_pc, max_addr=data_end_pc, terminator=terminator
+            )
+            raw = bytes(rom[data_pc:end_pc])
+        else:
+            raw = _read_until(rom, data_pc, terminator, data_end_pc)
         text = table.interpret_binary_data(list(raw), max_bytes=3, trim_bytes=[terminator])
         entries.append(ScriptEntry(
             id=f"{datadef.name}[{i:04d}]",

@@ -38,6 +38,7 @@ from retrotool.graphics.tiles import (
     encode_tile,
     tile_to_rgba,
 )
+from retrotool.graphics.ppm import write_ppm
 
 __all__ = [
     "Palette",
@@ -69,4 +70,5 @@ __all__ = [
     "png_to_palette",
     "png_to_map",
     "sfc_run",
+    "write_ppm",
 ]
