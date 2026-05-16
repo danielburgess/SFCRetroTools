@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass, field
 from math import log
 from pathlib import Path
 from typing import Optional, Union
@@ -14,6 +15,24 @@ _TABLE_CACHE_LOCK = threading.Lock()
 # Pre-computed two-digit uppercase hex strings 00..FF — used to expand
 # `**`/`%%` wildcards in .tbl files without per-iteration f-string format.
 _HEX2 = tuple(f'{i:02X}' for i in range(0x100))
+
+
+@dataclass
+class _CtrlEntry:
+    """Per-prefix control-code descriptor.
+
+    `default_length` is the total byte count consumed when the prefix byte
+    is followed by a `cmd` byte not present in `cmds` (or when the prefix
+    is standalone — set default_length=1 in that case). `cmds` maps cmd
+    byte → total length, overriding the default for specific cmd bytes.
+
+    Length INCLUDES the prefix byte itself. So a 1-byte standalone ctrl
+    has length=1 (no cmd byte consumed). A 2-byte `prefix + cmd` has
+    length=2 (prefix + 1 byte after). A 4-byte ctrl has length=4
+    (prefix + 3 bytes after).
+    """
+    default_length: int = 3
+    cmds: dict[int, int] = field(default_factory=dict)
 
 
 def load_table(
@@ -51,13 +70,14 @@ class Table:
     """Ported from v0.1 retrotool/script.py. Loads .tbl, encodes/decodes bytes↔text."""
 
     def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False):
-        enc, val_map, char_map, char_bytes, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt = self._load_table(table_file)
+        (enc, val_map, char_map, char_bytes, ctrl_table, ctrl_prefixes,
+         ctrl_types, err_count, cnt) = self._load_table(table_file)
         self.__val_map = val_map
         self.__chr_map = char_map
         self.__chr_bytes = char_bytes
-        self.__ctrl_lengths = ctrl_lengths
+        self.__ctrl_table: dict[int, _CtrlEntry] = ctrl_table
+        self.__ctrl_prefixes: list[int] = ctrl_prefixes  # insertion order preserved
         self.__ctrl_types = ctrl_types
-        self.__ctrl_prefix = ctrl_prefix
         self.__errors = err_count
         self.__parsed_lines = cnt
         self.__file_name = table_file
@@ -90,9 +110,10 @@ class Table:
         # serialization (e.g. `000A=X` → `0x0A` → b'\x0A', not b'\x00\x0A').
         # Encoders should prefer `char_bytes` for byte-faithful output.
         char_bytes: dict[str, bytes] = {}
-        ctrl_lengths: dict[int, int] = {}
-        ctrl_types: dict[int, str] = {}
-        ctrl_prefix: int = 0xFF
+        ctrl_table: dict[int, _CtrlEntry] = {}
+        ctrl_prefixes: list[int] = []          # insertion-ordered for stability
+        ctrl_types: dict[int, str] = {}        # flat cmd→type for backcompat
+        ctrl_prefix_declared = False           # first @ctrl_prefix replaces default
         err_count = 0
         cnt = 1
         with open(table_file, encoding=enc) as to:
@@ -107,42 +128,75 @@ class Table:
                     if not stripped or stripped.startswith(';'):
                         cnt += 1
                         continue
-                    # @ctrl_prefix XX: sets the control-code prefix byte
-                    # (default $FF). Must appear before any @ctrl entries to
-                    # take effect; otherwise the default is used.
+                    # @ctrl_prefix XX [YY ZZ ...]: declares control-code prefix
+                    # bytes. Default $FF if no @ctrl_prefix line is present. The
+                    # FIRST @ctrl_prefix line resets the prefix list (so a
+                    # single-prefix table behaves as before); subsequent lines
+                    # are additive. Multi-prefix lets games where F7-FE each
+                    # act as an independent opcode declare them all.
                     if stripped.startswith('@ctrl_prefix '):
-                        ctrl_prefix = int(stripped[len('@ctrl_prefix '):].strip(), 16)
+                        for tok in stripped[len('@ctrl_prefix '):].split():
+                            pb = int(tok, 16)
+                            if not ctrl_prefix_declared:
+                                ctrl_prefixes = []
+                                ctrl_prefix_declared = True
+                            if pb not in ctrl_prefixes:
+                                ctrl_prefixes.append(pb)
+                            ctrl_table.setdefault(pb, _CtrlEntry())
                         cnt += 1
                         continue
-                    # @ctrl directive: @ctrl XX=N defines control code <prefix> XX
-                    # with total byte length N (including the prefix).
-                    # Wildcards: @ctrl XX**=N applies to all <prefix> XX yy.
+                    # @ctrl directive — declares a per-prefix length entry.
+                    # Forms:
+                    #   @ctrl XX=N            — XX is a cmd byte under the
+                    #                            (first/default) prefix; length N
+                    #                            includes the prefix byte.
+                    #   @ctrl XX**=N          — same; trailing `**` is legacy
+                    #                            wildcard syntax preserved for
+                    #                            backcompat (the cmd-byte lookup
+                    #                            ignores the wildcard position).
+                    #   @ctrl PP.XX=N         — explicit per-prefix cmd entry;
+                    #                            applies when prefix byte is PP
+                    #                            and cmd byte is XX.
+                    #   @ctrl PP=N            — when PP is a declared
+                    #                            @ctrl_prefix, sets that prefix's
+                    #                            default length (used when the
+                    #                            cmd-byte lookup misses).
                     if stripped.startswith('@ctrl '):
-                        # Syntax:  @ctrl XX=N [type=NAME]
-                        # XX may use '**' as a wildcard second nibble.
                         rest = stripped[6:].strip()
                         tokens = rest.split()
                         head = tokens[0] if tokens else ''
                         if '=' in head:
                             pattern, length_s = head.split('=', 1)
-                            pattern = pattern.strip()
+                            pattern = pattern.strip().rstrip('*')  # drop trailing **
                             length = int(length_s.strip())
                             ctype = None
                             for extra in tokens[1:]:
                                 if extra.startswith('type='):
                                     ctype = extra[5:].strip()
-                            if '**' in pattern:
-                                prefix = int(pattern.replace('**', ''), 16)
-                                for d in range(0x100):
-                                    key = prefix * 0x100 + d
-                                    ctrl_lengths[key] = length
-                                    if ctype is not None:
-                                        ctrl_types[key] = ctype
-                            else:
-                                key = int(pattern, 16)
-                                ctrl_lengths[key] = length
+                            default_prefix = ctrl_prefixes[0] if ctrl_prefixes else 0xFF
+                            if '.' in pattern:
+                                # PP.XX form — explicit per-prefix cmd entry.
+                                ps, cs = pattern.split('.', 1)
+                                pb = int(ps, 16)
+                                cmd_byte = int(cs, 16)
+                                if pb not in ctrl_prefixes:
+                                    ctrl_prefixes.append(pb)
+                                entry = ctrl_table.setdefault(pb, _CtrlEntry())
+                                entry.cmds[cmd_byte] = length
                                 if ctype is not None:
-                                    ctrl_types[key] = ctype
+                                    ctrl_types[cmd_byte] = ctype
+                            else:
+                                byte_val = int(pattern, 16)
+                                if byte_val in ctrl_prefixes:
+                                    # PP=N — set this prefix's default length.
+                                    entry = ctrl_table.setdefault(byte_val, _CtrlEntry())
+                                    entry.default_length = length
+                                else:
+                                    # XX=N — cmd byte under default prefix.
+                                    entry = ctrl_table.setdefault(default_prefix, _CtrlEntry())
+                                    entry.cmds[byte_val] = length
+                                    if ctype is not None:
+                                        ctrl_types[byte_val] = ctype
                         cnt += 1
                         continue
                     parts = line.split('=')
@@ -173,7 +227,13 @@ class Table:
                     print(f"ERROR: {ex!r}")
                     err_count += 1
                 cnt += 1
-        return enc, val_map, char_map, char_bytes, ctrl_lengths, ctrl_types, ctrl_prefix, err_count, cnt
+        # If no @ctrl_prefix line appeared but @ctrl cmd entries did, fall
+        # back to the historical default prefix $FF so single-prefix tables
+        # written before this multi-prefix shape still parse the same way.
+        if not ctrl_prefix_declared and ctrl_table:
+            ctrl_prefixes = [0xFF]
+            ctrl_table.setdefault(0xFF, _CtrlEntry())
+        return enc, val_map, char_map, char_bytes, ctrl_table, ctrl_prefixes, ctrl_types, err_count, cnt
 
     @staticmethod
     def _set_maps(in_val, in_ch, val_map, char_map, char_bytes=None):
@@ -267,26 +327,79 @@ class Table:
 
     @property
     def ctrl_prefix(self) -> int:
-        """Control-code prefix byte (default $FF). Set via `@ctrl_prefix XX` directive."""
-        return self.__ctrl_prefix
+        """Primary control-code prefix byte (default $FF).
+
+        For single-prefix tables this is the byte declared by
+        `@ctrl_prefix XX`. For multi-prefix tables this is the FIRST
+        prefix declared — kept as a property for backward compatibility
+        with code that assumed exactly one prefix. New multi-prefix-aware
+        code should consult `ctrl_prefixes` instead.
+        """
+        return self.__ctrl_prefixes[0] if self.__ctrl_prefixes else 0xFF
+
+    @property
+    def ctrl_prefixes(self) -> list[int]:
+        """All declared control-code prefix bytes, in declaration order.
+
+        Empty list means no `@ctrl_prefix` directive was found AND no
+        `@ctrl` cmd entries were declared. Tables declaring `@ctrl` cmds
+        without an explicit `@ctrl_prefix` fall back to `[0xFF]` for
+        backward compatibility with the single-prefix-only era.
+        """
+        return list(self.__ctrl_prefixes)
 
     @property
     def ctrl_types(self) -> dict[int, str]:
         """Control-code semantic tags parsed from `@ctrl XX=N type=NAME` lines.
 
-        Keys match `ctrl_lengths` keys. Values are free-form names understood
-        by downstream consumers (e.g. `"redirect"` for FF-redirect opcodes
-        like FFC0/FFF7). Missing entries have no declared type."""
+        Single-prefix shape: cmd byte → tag string. Multi-prefix tables
+        still surface a flat cmd→type view here (tags collide silently if
+        the same cmd byte recurs under different prefixes); use the
+        per-prefix `ctrl_table()` to disambiguate.
+        """
         return self.__ctrl_types
 
     @property
     def ctrl_lengths(self) -> dict[int, int]:
-        """FF-control-code byte lengths parsed from @ctrl directives.
+        """Flat cmd-byte → total-length view for the primary prefix.
 
-        Keys: command byte(s) following the FF prefix. Values: total byte
-        length including the FF prefix itself. Prevents decoders from
-        splitting on 0x00 bytes that appear inside FF-command parameters."""
-        return self.__ctrl_lengths
+        Backward-compatible single-prefix shape. For multi-prefix tables,
+        this returns only the cmd entries declared under the FIRST prefix;
+        use `ctrl_lookup(prefix, cmd)` or `ctrl_table()` for full coverage.
+
+        Length includes the prefix byte itself.
+        """
+        if not self.__ctrl_prefixes:
+            return {}
+        entry = self.__ctrl_table.get(self.__ctrl_prefixes[0])
+        return dict(entry.cmds) if entry else {}
+
+    def ctrl_lookup(self, prefix: int, cmd: Optional[int] = None) -> Optional[int]:
+        """Return total ctrl length for `prefix` (+ optional `cmd`).
+
+        Returns `None` if `prefix` is not a declared @ctrl_prefix byte.
+        Otherwise: if `cmd` is None or has no per-cmd override, returns
+        the prefix's `default_length`; if `cmd` matches an entry, returns
+        the override length.
+        """
+        entry = self.__ctrl_table.get(prefix)
+        if entry is None:
+            return None
+        if cmd is None:
+            return entry.default_length
+        return entry.cmds.get(cmd, entry.default_length)
+
+    def ctrl_table(self) -> dict[int, tuple[int, dict[int, int]]]:
+        """Snapshot of the per-prefix control-code table.
+
+        Maps prefix byte → (default_length, {cmd_byte: length, ...}).
+        Returned tuples are copies; modifying them does not affect the
+        Table's internal state.
+        """
+        return {
+            p: (e.default_length, dict(e.cmds))
+            for p, e in self.__ctrl_table.items()
+        }
 
     def get_value(self, word: str, infer_value: bool = True) -> Optional[int]:
         if not isinstance(word, str):
@@ -356,8 +469,8 @@ class Table:
         final = ''
         i = 0
         n = len(bin_data)
-        ctrl_prefix = self.__ctrl_prefix
-        ctrl_lengths = self.__ctrl_lengths
+        ctrl_table = self.__ctrl_table
+        ctrl_prefixes = self.__ctrl_prefixes
         while i <= n + 1:
             if i >= n:
                 break
@@ -366,9 +479,20 @@ class Table:
             # payload. `find_entry_end` already walks ctrls this way;
             # the plain decode path used to ignore them, splitting
             # payload bytes across hex escape + literal char decodes.
-            if bin_data[i] == ctrl_prefix and i + 1 < n:
-                cmd = bin_data[i + 1]
-                span = ctrl_lengths.get(cmd, 3)
+            #
+            # Multi-prefix lookup: when bin_data[i] matches any declared
+            # ctrl-prefix byte, consume its per-prefix length. For PP+cmd
+            # ctrls the cmd byte is bin_data[i+1]; for standalone PP ctrls
+            # (length=1) no cmd is consumed.
+            cur_byte = bin_data[i]
+            if cur_byte in ctrl_prefixes:
+                entry = ctrl_table[cur_byte]
+                if entry.default_length <= 1:
+                    span = entry.default_length
+                elif i + 1 < n:
+                    span = entry.cmds.get(bin_data[i + 1], entry.default_length)
+                else:
+                    span = 1
                 end = min(i + span, n)
                 final += self.hex_dump(bin_data[i:end])
                 i = end
@@ -452,29 +576,45 @@ class Table:
     def find_entry_end(self, bin_data, start: int, max_bytes: int = 3,
                        max_addr: Optional[int] = None,
                        terminator: int = 0x00) -> int:
-        """Left-to-right decode to find the entry terminator. Uses @ctrl lengths
-        so parameter bytes inside control-code sequences aren't mistaken for
-        terminators. `terminator` defaults to $00 but can be set to any byte
-        value for games that terminate strings with a different sentinel."""
-        ctrl = self.__ctrl_lengths
-        prefix = self.__ctrl_prefix
+        """Left-to-right decode to find the entry terminator. Uses @ctrl
+        lengths so parameter bytes inside control-code sequences aren't
+        mistaken for terminators. `terminator` defaults to $00; set to any
+        byte value for games that terminate with a different sentinel.
+
+        Multi-prefix tables: every byte declared via @ctrl_prefix triggers
+        a per-prefix length lookup. For prefix entries with default_length=1
+        (standalone control codes), only the prefix byte is consumed.
+        """
+        ctrl_table = self.__ctrl_table
+        ctrl_prefixes = self.__ctrl_prefixes
         i = start
-        while i < len(bin_data):
+        n = len(bin_data)
+        while i < n:
             if max_addr is not None and i >= max_addr:
                 return i
-            if bin_data[i] == prefix and i + 1 < len(bin_data):
-                cmd = bin_data[i + 1]
-                ctrl_len = ctrl.get(cmd, 3)
+            cur_byte = bin_data[i]
+            if cur_byte in ctrl_prefixes:
+                entry = ctrl_table[cur_byte]
+                if entry.default_length <= 1:
+                    ctrl_len = entry.default_length
+                elif i + 1 < n:
+                    ctrl_len = entry.cmds.get(bin_data[i + 1], entry.default_length)
+                else:
+                    ctrl_len = 1
+                # Standalone single-byte ctrl that also equals the terminator
+                # marks end-of-entry (rbshura's $FF STOP works this way).
+                if ctrl_len == 1 and cur_byte == terminator:
+                    return i + 1
                 i += ctrl_len
                 continue
             matched = False
             for size in range(max_bytes, 1, -1):
-                if i + size > len(bin_data):
+                if i + size > n:
                     continue
                 window = list(bin_data[i:i + size])
-                # Don't fold the ctrl prefix into a multi-byte char — its
+                # Don't fold a ctrl-prefix byte into a multi-byte char — its
                 # role belongs to the next ctrl sequence, not this entry.
-                if size > 1 and window[-1] == prefix:
+                if size > 1 and window[-1] in ctrl_prefixes:
                     continue
                 val = self.bytes_to_val(window, True)
                 if self.byte_size(val) != size:
@@ -484,7 +624,7 @@ class Table:
                     matched = True
                     break
             if not matched:
-                if bin_data[i] == terminator:
+                if cur_byte == terminator:
                     return i + 1
                 i += 1
         return i
