@@ -8,7 +8,7 @@ __pycache__/
 *.egg-info/
 /build/
 /dist/
-/Plans/
+Plans/
 .venv/
 .idea/
 *.whl
