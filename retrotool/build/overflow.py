@@ -454,19 +454,46 @@ def _splitter_at_last_marker_byte_factory(arg: object, *, ctx: Optional[dict] = 
 
 
 def split_ctrl_aware(
-    ctrl_lengths: dict,
+    ctrl_lengths: Optional[dict] = None,
     *,
+    ctrl_table: Optional[dict] = None,
     default_length: int = 2,
     terminator: Optional[int] = 0x00,
     event_script: bool = False,
     text_enter: int = 0x10,
 ) -> Callable[[bytes, int], int]:
-    """Latest safe byte-boundary split that respects multi-byte FF control
-    codes. Mirrors LM3 `_find_safe_split`: walks `encoded`, tracking
-    last position that lands between complete tokens. For non-event data,
-    stops at the first `terminator` (entry end); for event-script data,
-    returns the last safe split inside a text window ([text_enter]..[term]).
+    """Latest safe byte-boundary split, control-code aware.
+
+    Two calling shapes (mutually exclusive at the conceptual level —
+    both may be passed for backward compatibility but `ctrl_table` wins):
+
+      • Multi-prefix (preferred): pass
+        `ctrl_table = {prefix_byte: (default_length, {cmd_byte: len, ...}), ...}`
+        — typically obtained from `Table.ctrl_table()`. Every declared
+        prefix byte is treated as a ctrl opener, using its own default
+        length and per-cmd overrides. A 1-byte standalone (default_length=1
+        with no cmds) that equals `terminator` is treated as a terminator,
+        not a ctrl token.
+
+      • Legacy single-prefix: pass
+        `ctrl_lengths = {cmd_byte: length, ...}` + `default_length`.
+        Internally wrapped as `{0xFF: (default_length, ctrl_lengths)}`,
+        preserving the LM3-era contract (FF as sole 2-byte prefix,
+        terminator 0x00).
+
+    For non-event data, stops at the first `terminator`. For event-script
+    data, returns the last safe split inside a text window
+    ([text_enter]..[terminator]).
     """
+    if ctrl_table is None:
+        ctrl_table = {0xFF: (default_length, dict(ctrl_lengths or {}))}
+    # Freeze a fast lookup with primitives only — the closure shouldn't
+    # re-dict-lookup per byte.
+    prefix_set = frozenset(ctrl_table.keys())
+    prefix_info = {
+        p: (dl, dict(cmds)) for p, (dl, cmds) in ctrl_table.items()
+    }
+
     def _splitter(encoded: bytes, budget: int) -> int:
         if budget <= 0:
             return 0
@@ -477,9 +504,33 @@ def split_ctrl_aware(
         n = len(encoded)
         while pos < n:
             b = encoded[pos]
-            if b == 0xFF and pos + 1 < n:
-                sub = encoded[pos + 1]
-                cl = ctrl_lengths.get(sub, default_length)
+            if b in prefix_set:
+                default_len, cmds = prefix_info[b]
+                # 1-byte standalone ctrl that doubles as terminator: take
+                # the terminator branch so the entry actually ends here.
+                if (
+                    default_len == 1 and not cmds
+                    and terminator is not None and b == terminator
+                ):
+                    if event_script:
+                        if pos + 1 <= budget:
+                            if in_text:
+                                in_text = False
+                            last_safe = pos + 1
+                            pos += 1
+                            continue
+                        else:
+                            break
+                    else:
+                        break
+                # Determine length: peek the cmd byte if available; for
+                # 1-byte standalone (no cmds, default=1) skip the peek.
+                if default_len == 1 and not cmds:
+                    cl = 1
+                elif pos + 1 < n:
+                    cl = cmds.get(encoded[pos + 1], default_len)
+                else:
+                    cl = default_len
                 if pos + cl <= budget:
                     last_safe = pos + cl
                     if event_script and in_text:
@@ -518,17 +569,25 @@ def split_ctrl_aware(
 
 
 def _splitter_ctrl_aware_factory(arg: object, *, ctx: Optional[dict] = None) -> Callable[[bytes, int], int]:
-    """Ctrl-aware splitter. Uses `ctx['ctrl_lengths']` provided by the caller
-    (handler builds it from the loaded Table). `arg` may be a dict overriding
-    `event_script`/`terminator`/`text_enter`/`default_length`.
+    """Ctrl-aware splitter. Reads splitter inputs from `ctx`:
+      • `ctx['ctrl_table']` (preferred, multi-prefix shape) OR
+      • `ctx['ctrl_lengths']` (legacy single-prefix shape, FF assumed)
+      • `ctx['terminator']` (entry terminator; default 0x00)
+      • `ctx['event_script']` (default False)
+
+    `arg` (the `splitter-arg` from config) may be a dict overriding
+    `event_script` / `terminator` / `text_enter` / `default_length`.
+    Explicit `arg` values win over ctx values.
     """
     ctx = ctx or {}
+    ctrl_table = ctx.get("ctrl_table")
     ctrl_lengths = ctx.get("ctrl_lengths") or {}
     opts = arg if isinstance(arg, dict) else {}
     return split_ctrl_aware(
         ctrl_lengths,
+        ctrl_table=ctrl_table,
         default_length=int(opts.get("default-length", 2)),
-        terminator=opts.get("terminator", 0x00),
+        terminator=opts.get("terminator", ctx.get("terminator", 0x00)),
         event_script=bool(opts.get("event-script", ctx.get("event_script", False))),
         text_enter=int(opts.get("text-enter", 0x10)),
     )

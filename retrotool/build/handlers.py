@@ -47,8 +47,10 @@ class _PreparedScript:
       * `"overflow"` — `auto_entries` (encode_script_file output for the
         auto-window path), `windowed` (encode_windowed_script_file output for
         marker entries, only populated when the file actually contains
-        `<<<window>>>` markers), `orig_pcs`, `ctrl_lengths`, and
-        `source_snapshot` (always captured pre-write for window resolution).
+        `<<<window>>>` markers), `orig_pcs`, `ctrl_lengths`, `ctrl_table`
+        (multi-prefix snapshot for downstream ctrl-aware walks), `terminator`
+        (entry terminator byte), and `source_snapshot` (always captured
+        pre-write for window resolution).
     """
     mode: str  # "relocate" or "overflow"
     # Relocate-mode payload:
@@ -59,6 +61,8 @@ class _PreparedScript:
     windowed: Optional[list] = None
     orig_pcs: Optional[list] = None
     ctrl_lengths: Optional[dict] = None
+    ctrl_table: Optional[dict] = None
+    terminator: Optional[int] = None
     has_window_markers: bool = False
 
 
@@ -917,8 +921,18 @@ def handle_script(
         # table baked into config.
         from retrotool.script.table import load_table as _load_split_table
         _slot_tbl = _load_split_table(str(table_path))
+        # Pass both shapes: `ctrl_table` is the multi-prefix snapshot the
+        # newer splitter prefers; `ctrl_lengths` is the legacy single-prefix
+        # flat view kept for any user-provided splitter that still reads it.
+        # `terminator` rides the same ctx so splitters can honor the
+        # section's declared entry-terminator byte (rbshura: 0xFF, LM3: 0x00).
+        _ctrl_table_fn = getattr(_slot_tbl, "ctrl_table", None)
         splitter_ctx = {
             "ctrl_lengths": getattr(_slot_tbl, "ctrl_lengths", {}) or {},
+            "ctrl_table": _ctrl_table_fn() if callable(_ctrl_table_fn) else None,
+            "terminator": (
+                section.terminator if section.terminator is not None else 0x00
+            ),
         }
         overflow_strategy = _strategy_from_config(
             section.overflow, splitter_ctx=splitter_ctx,
@@ -1422,6 +1436,10 @@ def _script_prepare_overflow(
 
     tbl = _load_win_table(str(table_path))
     ctrl_lengths = tbl.ctrl_lengths
+    ctrl_table = tbl.ctrl_table()
+    prep_terminator = (
+        section.terminator if section.terminator is not None else 0x00
+    )
 
     # Original pointers — 2-byte, bank implicit from ptr_tbl_pc's bank.
     count = int(section.count)
@@ -1493,6 +1511,8 @@ def _script_prepare_overflow(
         windowed=windowed,
         orig_pcs=orig_pcs,
         ctrl_lengths=ctrl_lengths,
+        ctrl_table=ctrl_table,
+        terminator=prep_terminator,
         source_snapshot=bytes(rom_snapshot),
         has_window_markers=has_window_markers,
     )
@@ -1553,6 +1573,8 @@ def _handle_script_windowed(
     source_snapshot = prepared.source_snapshot or bytes(rom)
     orig_pcs = prepared.orig_pcs or []
     ctrl_lengths = prepared.ctrl_lengths or {}
+    ctrl_table = prepared.ctrl_table
+    prep_terminator = prepared.terminator
     count = int(section.count)
 
     # Forward encoder (inline stub → tail in $C6 freespace): lorom1 ($80+).
@@ -1582,6 +1604,8 @@ def _handle_script_windowed(
             script_path, table_path, fallback_path, forward_encoder,
             skip_indices=windowed_idx_set,
             ctrl_lengths=ctrl_lengths,
+            ctrl_table=ctrl_table,
+            terminator=prep_terminator,
             entries=prepared.auto_entries,
         )
         writes_b = _emit_windowed_marker_writes(
@@ -1595,6 +1619,8 @@ def _handle_script_windowed(
         rom, section, ctx, source_snapshot, orig_pcs, count,
         script_path, table_path, fallback_path, forward_encoder,
         ctrl_lengths=ctrl_lengths,
+        ctrl_table=ctrl_table,
+        terminator=prep_terminator,
         entries=prepared.auto_entries,
     )
 
@@ -1714,6 +1740,8 @@ def _emit_auto_window_writes(
     script_path, table_path, fallback_path, forward_encoder,
     skip_indices: Optional[set[int]] = None,
     ctrl_lengths: Optional[dict[int, int]] = None,
+    ctrl_table: Optional[dict] = None,
+    terminator: Optional[int] = None,
     entries: Optional[list] = None,
 ) -> list[WriteRange]:
     """Universal in-place + FFC0 overflow for plain `<<$BANK:N>>` files.
@@ -1746,21 +1774,45 @@ def _emit_auto_window_writes(
     # Skip sentinel ptrs (None — decoded outside LoROM mappable area).
     sorted_pcs = sorted({p for p in orig_pcs if p is not None})
 
+    # Normalize the ctrl-walk inputs. `ctrl_table` (preferred, multi-prefix)
+    # wins; otherwise wrap legacy `ctrl_lengths` as a single 0xFF prefix.
+    # `term_byte` defaults to 0x00 (LM3) when the section didn't declare one.
+    if ctrl_table is not None:
+        _walk_table: dict = ctrl_table
+    elif ctrl_lengths is not None:
+        _walk_table = {0xFF: (2, dict(ctrl_lengths))}
+    else:
+        _walk_table = None
+    _walk_prefixes = frozenset(_walk_table.keys()) if _walk_table else frozenset()
+    term_byte = terminator if terminator is not None else 0x00
+
     def _measure_source_entry(start_pc: int) -> int:
-        # Ctrl-aware walk: advances past FF <code> runs using ctrl_lengths,
-        # stops at first 0x00 (text terminator) INCLUSIVE. Used as the slot
-        # upper bound for the last entry (no next-ptr distance available).
-        if ctrl_lengths is None:
+        # Ctrl-aware walk: advances past <prefix> <cmd> runs using
+        # per-prefix lengths, stops at first `term_byte` INCLUSIVE.
+        # Used as the slot upper bound for the last entry (no next-ptr
+        # distance available).
+        if not _walk_table:
             return 0
         pos = start_pc
         end_limit = len(source_snapshot)
         while pos < end_limit:
             b = source_snapshot[pos]
-            if b == 0x00:
+            if b in _walk_prefixes:
+                default_len, cmds = _walk_table[b]
+                # 1-byte standalone that doubles as the terminator → end.
+                if (
+                    default_len == 1 and not cmds
+                    and b == term_byte
+                ):
+                    return (pos - start_pc) + 1
+                if default_len == 1 and not cmds:
+                    pos += 1
+                elif pos + 1 < end_limit:
+                    pos += cmds.get(source_snapshot[pos + 1], default_len)
+                else:
+                    pos += default_len
+            elif b == term_byte:
                 return (pos - start_pc) + 1
-            if b == 0xFF and pos + 1 < end_limit:
-                code = source_snapshot[pos + 1]
-                pos += ctrl_lengths.get(code, 2)
             else:
                 pos += 1
         return end_limit - start_pc
