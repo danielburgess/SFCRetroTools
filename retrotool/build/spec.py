@@ -65,6 +65,7 @@ class Section:
     bpp: Optional[int] = None
     count: Optional[int] = None
     pointer_table: Optional[int] = None
+    data_end: Optional[int] = None          # upper bound for relocate-mode data
     pad_to: Optional[int] = None
     grow: Optional[str] = None              # "insert" | "replace" | "fail"
     dedupe: bool = False
