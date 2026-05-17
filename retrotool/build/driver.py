@@ -629,6 +629,15 @@ def build(
             if _sec.kind is SectionKind.SCRIPT and not _sec.placement:
                 _sec.placement = dict(_default_placement)
 
+    # Populate Section.address_type from spec mapping. The extract path does
+    # this in extract.py; build needs the same so handlers don't fall back to
+    # LoROM1 when the project is HiROM/SA-1/etc. Matches the rule documented
+    # at extract.py:464.
+    _spec_addr_type = spec.address_type()
+    for _sec in spec.sections:
+        if _sec.address_type is None:
+            _sec.address_type = _spec_addr_type
+
     section_results: list[SectionResult] = []
     skipped: list[Section] = []
     cache_hits = 0

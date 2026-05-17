@@ -142,6 +142,8 @@ def _section_from_datadef(
         if dd.encoding.fallback is not None:
             sec.fallback_table = _path(dd.encoding.fallback)
         sec.terminator = dd.encoding.terminator
+    if dd.data is not None and dd.data.end is not None:
+        sec.data_end = dd.data.end
     # Section offset = whichever anchor the DataDef has. For fixed-records
     # that's data.offset (write target). For pointer-typed scripts the
     # natural anchor is the pointer table itself, so ordering works cleanly.

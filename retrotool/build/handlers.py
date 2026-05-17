@@ -770,12 +770,19 @@ def _script_prepare_relocate(
         if section.fallback_table else None
     )
 
+    # Encoder's sub_table_filter expects a PC offset; section.pointer_table may
+    # be a raw SNES address from the spec (`offset = "$8586E4"`). Convert via
+    # section.address_type (populated from spec.mapping by the driver).
+    from retrotool.core.address import SFCAddress, SFCAddressType
+    addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
+    sub_table_pc = SFCAddress(section.pointer_table, addr_type).get_address(SFCAddressType.PC)
+
     entries = encode_script_file(
         script_path, table_path,
         fallback_table=fallback_path,
         word_wrap=section.word_wrap,
         textbuf_limit=section.textbuf_limit,
-        sub_table_filter=section.pointer_table,
+        sub_table_filter=sub_table_pc,
     )
     count = int(section.count) if section.count is not None else 0
     while len(entries) < count:
@@ -899,7 +906,15 @@ def handle_script(
 
     table_path = _resolve(Path(str(section.table)), root)
 
-    ptr_tbl_pc = section.pointer_table
+    # Normalize pointer_table to a PC offset. section.pointer_table may be
+    # either a SNES address (`offset = "$8586E4"`) or a PC offset depending
+    # on how the spec is written. Use section.address_type (populated by
+    # driver from spec mapping) for the conversion, falling back to LoROM1.
+    from retrotool.core.address import SFCAddress, SFCAddressType
+    addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
+    _ptr_addr = SFCAddress(section.pointer_table, addr_type)
+    ptr_tbl_pc = _ptr_addr.get_address(SFCAddressType.PC)
+    ptr_tbl_bank = _ptr_addr.get_bank_byte(addr_type)
     ptr_tbl_len = count * ptr_size
     data_start = ptr_tbl_pc + ptr_tbl_len
 
@@ -962,20 +977,16 @@ def handle_script(
             fixup_pointer_encoder = _get_pointer_encoder(str(enc_name))
 
     # Sentinel passthrough. Source ROMs sometimes pad the ptr table tail with
-    # entries that decode outside the LoROM window (system-area mirrors, etc.).
-    # Those slots hold no real text; re-encoding the script bytes in their
-    # place would consume data-region space and shift every subsequent ptr.
-    # Detect by decoding the source ptr under LoROM1 — if `lorom1_to_pc` is
-    # None, carry the raw source bytes straight through into the output ptr
-    # table and skip the data write. Snapshot before any writes since handlers
-    # mutate `rom` in place.
-    from retrotool.core.address import SFCAddress, SFCAddressType
+    # entries that decode outside the mappable window (system-area mirrors,
+    # etc.). Those slots hold no real text; re-encoding the script bytes in
+    # their place would consume data-region space and shift every subsequent
+    # ptr. Detect by decoding the source ptr under the project's address
+    # type — if conversion to PC returns None, carry the raw source bytes
+    # straight through into the output ptr table and skip the data write.
+    # Snapshot before any writes since handlers mutate `rom` in place.
     _ensure_room(rom, ptr_tbl_pc + ptr_tbl_len)
     src_ptr_bytes = bytes(rom[ptr_tbl_pc:ptr_tbl_pc + ptr_tbl_len])
-    bank_hi = (
-        SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
-        if ptr_size == 2 else 0
-    )
+    bank_hi = ptr_tbl_bank if ptr_size == 2 else 0
     sentinel_raw: dict[int, bytes] = {}
     src_pc: dict[int, int] = {}
     zero_slot = b"\x00" * ptr_size
@@ -989,7 +1000,7 @@ def handle_script(
             snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
         else:
             snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
-        pc = SFCAddress.lorom1_to_pc(snes, verbose=False)
+        pc = SFCAddress(snes, addr_type).get_address(SFCAddressType.PC)
         if pc is None:
             sentinel_raw[i] = raw
         else:
@@ -1035,6 +1046,15 @@ def handle_script(
     # no overflow strategy is configured, we fall back to sequential bump
     # from `cur`. With an overflow strategy configured, oversize entries
     # are routed through the strategy (inline stub + tail in freespace).
+    #
+    # Enforce [data].end as a hard upper bound. Without this, oversize EN
+    # content silently runs past data_end and clobbers whatever follows
+    # (often the next sibling-section's pointer table — see rbshura, where
+    # ~14 scenarios share bank $05 sequentially and scenario_00's overflow
+    # corrupted scenario_02's table → cascading crashes).
+    data_end_pc: Optional[int] = None
+    if section.data_end is not None:
+        data_end_pc = SFCAddress(section.data_end, addr_type).get_address(SFCAddressType.PC)
     cur = data_start
     for i, (enc, orig_addr, ent_fixups, ent_labels, force_overflow) in enumerate(entries):
         if i in sentinel_raw:
@@ -1113,6 +1133,31 @@ def handle_script(
             if (slot_end is not None and pc + len(enc) > slot_end
                     and overflow_strategy is None):
                 pc = cur  # overflow of source slot → sequential fallback
+            # Hard-enforce [data].end. Past this boundary lies (typically)
+            # the next sibling section's pointer table — silent overrun
+            # cascades into wild-pointer crashes at runtime. When the entry
+            # would exceed data_end, fall back to keeping the original
+            # source pointer (entry stays untranslated, source bytes intact).
+            if data_end_pc is not None and pc + len(enc) > data_end_pc:
+                if i in src_pc:
+                    # Keep the original pointer + original ROM bytes.
+                    entry_pc[i] = src_pc[i]
+                    ptrs.append(src_pc[i])
+                    if orig_addr is not None:
+                        seen_addrs[orig_addr] = src_pc[i]
+                    seen_src_pc.setdefault(src_pc[i], src_pc[i])
+                    print(
+                        f"  WARNING: {section.source} entry {i} ({len(enc)}B) "
+                        f"exceeds [data].end ${data_end_pc:06X}; KEEPING ORIGINAL "
+                        f"pointer ${src_pc[i]:06X} (entry remains untranslated)."
+                    )
+                    continue
+                else:
+                    raise HandlerError(
+                        f"{section.source}: entry {i} ({len(enc)}B) would write "
+                        f"past [data].end at ${pc:06X}+{len(enc)}=${pc+len(enc):06X} "
+                        f"> ${data_end_pc:06X}, and no original src_pc to fall back to."
+                    )
             _ensure_room(rom, pc + len(enc))
             rom[pc:pc + len(enc)] = enc
             writes.append(WriteRange(offset=pc, length=len(enc)))
@@ -1441,28 +1486,39 @@ def _script_prepare_overflow(
         section.terminator if section.terminator is not None else 0x00
     )
 
-    # Original pointers — 2-byte, bank implicit from ptr_tbl_pc's bank.
+    # Original pointers — 2-byte, bank implicit from ptr_tbl's bank.
+    # Use section.address_type (populated from [rom].mapping by driver) instead
+    # of hardcoding LoROM1, so HiROM/SA-1/etc. projects resolve correctly.
+    # section.pointer_table may be either a SNES address (`offset = "$8586E4"`)
+    # or a PC offset depending on how the TOML/MBXML was authored — both work
+    # because we always pass it as the input to SFCAddress(value, addr_type)
+    # and read out the PC form for indexing.
     count = int(section.count)
-    ptr_tbl_pc = section.pointer_table
-    ptr_bank = SFCAddress(ptr_tbl_pc).get_bank_byte(SFCAddressType.LOROM1)
+    addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
+    ptr_addr = SFCAddress(section.pointer_table, addr_type)
+    ptr_bank = ptr_addr.get_bank_byte(addr_type)
+    ptr_tbl_pc = ptr_addr.get_address(SFCAddressType.PC)
     orig_pcs: list[int] = []
     for i in range(count):
         off = ptr_tbl_pc + i * 2
         addr16 = rom_snapshot[off] | (rom_snapshot[off + 1] << 8)
         snes = (ptr_bank << 16) | addr16
-        pc = SFCAddress(snes, SFCAddressType.LOROM1).get_address(SFCAddressType.PC)
+        pc = SFCAddress(snes, addr_type).get_address(SFCAddressType.PC)
         orig_pcs.append(pc)
 
     # Auto-window entries: always encode (covers both pure auto-window files
     # and the non-marker entries in hybrid files; encode_script_file returns
     # b'\x00' for entries containing `<<<window>>>` markers, so the apply
     # phase naturally routes those to the windowed path via the skip set).
+    # The encoder's sub_table_filter expects a PC offset, so pass ptr_tbl_pc
+    # (the converted form) rather than section.pointer_table which may be a
+    # raw SNES address from the spec.
     auto_entries = encode_script_file(
         script_path, table_path,
         fallback_table=fallback_path,
         word_wrap=section.word_wrap,
         textbuf_limit=section.textbuf_limit,
-        sub_table_filter=section.pointer_table,
+        sub_table_filter=ptr_tbl_pc,
     )
     while len(auto_entries) < count:
         auto_entries.append((b"\x00", None, [], {}, False))
