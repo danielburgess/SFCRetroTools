@@ -416,15 +416,29 @@ All pixel-level SNES formats.
 - `Tile` / `decode_tile` / `encode_tile` — 1BPP-IL, 2BPP, 4BPP, 8BPP planar codec, with
   `flipped(h=, v=)` and grid compositor.
 - `TilemapEntry` — 16-bit SNES tilemap word (tile 10b, palette 3b, priority, H-flip, V-flip).
+- `project_tilemap(entries, src_cols, src_rows, *, tile_base=0, base_entry=0, dest_cols=32, dest_entries=1024, palette_remap=None, force_priority=False, skip_tiles=None)` —
+  place a small tilemap into a larger sparse/windowed destination stream (for
+  engines that DMA a fixed window of a BG tilemap). Offsets tile indices by
+  `tile_base`, remaps palettes, leaves `skip_tiles` (e.g. the blank tile) as `$0000`.
 - `SpriteFrame` / `render_frame` — compose frames from positioned 8×8 tiles; `pack_atlas`
   returns an `Atlas` with per-frame `AtlasEntry` origin metadata.
 
 With the `[libsfx]` extra (0.9.0+):
 
-- `png_to_tiles(png, bpp=4, mode="snes", …)` — convert PNG to raw tile bytes.
-- `png_to_palette(png, mode="snes", colors=16, palettes=8)` — extract palette bytes.
-- `png_to_map(png, tiles, palette, bpp=4, mode="snes")` — build a tilemap that
+- `png_to_tiles(png, bpp=4, mode="snes", no_flip=False, no_discard=False, palette=None, tile_width=8, tile_height=8)` — convert PNG to raw tile bytes.
+- `png_to_palette(png, mode="snes", colors=16, palettes=8, color_zero=None, tile_width=8, tile_height=8)` — extract palette bytes (`color_zero="RRGGBB"` forces a fixed backdrop into index 0).
+- `png_to_map(png, tiles, palette, bpp=4, mode="snes", tile_width=8, tile_height=8)` — build a tilemap that
   references previously-emitted tile + palette bins.
+- `encode_png(png, *, bpp=4, colors=16, palettes=8, color_zero=None, no_flip=False, no_discard=False, fixed_palette=None, …)` →
+  `EncodedGraphics(tiles, palette, entries, cols, rows)` — one SuperFamiconv pass yielding
+  mutually-consistent tiles + palette + `list[TilemapEntry]`. `.subpalette_colors(n)` returns a
+  subpalette's RGB for palette remapping. `fixed_palette=` (BGR555 bytes) skips palette extraction
+  and packs against the given order. Pair with `project_tilemap` to reinsert edited
+  word-art / UI graphics into an engine-specific tilemap.
+- `png_palette_rgb(png)` — read an indexed PNG's PLTE as ordered `(r,g,b)` list.
+- `grouped_palette_bytes(colors_rgb, *, subpalettes, colors_per)` — build a fixed BGR555 SNES
+  palette from an ordered RGB list (`[shared idx0] + (colors_per-1)` per subpalette), preserving
+  source order so re-encoded indices match a ROM's CGRAM.
 - `sfc_run(args)` — raw pass-through to the bundled SuperFamiconv binary.
 - `SFCNotFoundError` — raised when neither the bundled wheel nor a `superfamiconv`
   on `PATH` is available.
@@ -572,8 +586,17 @@ registry features. The first three land incrementally in 0.9.
 
 - **Unified `<bin codec=>`** — `lzss-zamn`, `lzss-rbshura`, `lzss-legacy`,
   `rle`. `grow="replace|insert|fail"` controls size-change behavior.
-- **`<graphics>`** — `offset`, `bpp`, `count`, `encode="planar|packed"`,
-  `codec=` dispatches through `retrotool.compression.registry`.
+- **`<graphics>`** — raw tile/palette data (`offset`, `bpp`, `count`,
+  `encode="planar|packed"`, `codec=` via `retrotool.compression.registry`), OR
+  **build-time PNG encode** when `file=` is a `.png` (or any `format=`/`map-offset=`
+  is set): runs SuperFamiconv (`[libsfx]`) → tiles at `offset` (`bpp`, `color-zero`,
+  `no-flip`, `tile-count` pad, `colors`, `palettes`). `palette-from-png="true"` packs
+  against the indexed PNG's OWN palette order (PLTE laid out as `[shared idx0] +
+  (colors-1)` per subpalette) so re-encoded pixel indices line up with a ROM's fixed
+  CGRAM instead of being re-sorted. With `format="tilemap"`/`map-offset=` it also
+  projects a tilemap (`tile-base`, `map-cols`, `map-entries`, `map-base-entry`,
+  `priority`, `palette-anchors="P:RRGGBB,…"` mapping SuperFamiconv subpalettes → SNES
+  palette #). Lets edited word-art round-trip back into a ROM straight from project.toml.
 - **`<script>`** — text/binary round-trip via `.tbl`; `pointer-table=`,
   `table=`.
 - **`<asar>`** — build-only; runs an asar patch. `defines=` / `includes=`

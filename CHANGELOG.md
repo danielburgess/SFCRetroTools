@@ -2,6 +2,48 @@
 
 ## 0.9.1 in progress
 
+### Build-time PNG graphics encode (`<graphics>` / `kind="graphics"`)
+
+`<graphics>` sections now accept a `.png` `file=` (or any `format=`/`map-offset=`
+attr) and encode it through the bundled SuperFamiconv (`[libsfx]`) at build time,
+so edited word-art / UI graphics round-trip back into a ROM straight from
+`project.toml` — no pre-baked bin step.
+
+```toml
+[[rom.build.sections]]
+kind = "graphics"
+file = "art/title.png"
+bpp = 2
+offset = "$210000"          # tiles destination (file offset)
+tile-count = 36             # pad tiles to N (e.g. a fixed DMA budget)
+color-zero = "FF00FF"       # force backdrop colour into palette index 0
+# optional tilemap projection:
+map-offset = "$210900"
+tile-base = "$E0"           # added to tile indices (VRAM slot the DMA targets)
+map-cols = 32
+map-entries = 128
+map-base-entry = 2          # destination entry of the plate's top-left cell
+priority = true
+palette-anchors = "4:E7E700,5:FF5A08"  # subpalette (by anchor colour) -> SNES palette #
+```
+
+`palette-from-png="true"` packs against the indexed PNG's own palette order
+(PLTE = `[shared idx0] + (colors-1)` per subpalette) so re-encoded pixel indices
+line up with a ROM's fixed CGRAM rather than being re-sorted by SuperFamiconv.
+
+New `retrotool.graphics` API backing it: `encode_png(...) -> EncodedGraphics`
+(one SuperFamiconv pass → consistent tiles + palette + `list[TilemapEntry]`;
+`fixed_palette=` packs against a supplied BGR555 order), `project_tilemap(...)`
+(place a small plate into a larger sparse/windowed tilemap with tile-base offset,
+palette remap, and blank-tile skip), `png_palette_rgb()` / `grouped_palette_bytes()`
+(read + group an indexed PNG's palette), and `color_zero`/`colors`/`palettes`/
+`tile_width`/`tile_height` flags on the `png_to_tiles`/`png_to_palette`/`png_to_map` wrappers.
+
+Note for handler authors: build handlers must **return every `WriteRange`** they
+write — the driver reconstructs the output ROM from the returned ranges, so a
+side-mutation outside the return value is dropped. `_handle_graphics_png` returns
+`[tiles_range, map_range]`.
+
 ### Mesen2 SRAM auto-sync
 
 Opt-in post-build hook that clones the source ROM's `.srm` to match the

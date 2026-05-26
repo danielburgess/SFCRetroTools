@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 from retrotool.build.script_filter import ScriptFilter
 from retrotool.build.spec import Section, SectionKind
+from retrotool.core.address import SFCAddressType
 
 
 @dataclass
@@ -154,11 +155,140 @@ def handle_bin(rom: bytearray, section: Section, root: Path, ctx: Optional[Build
     return _write(rom, section.offset, data, allow_grow=allow_grow, source=section.source or "")
 
 
+def _attr_hex(v: Optional[str]) -> Optional[int]:
+    """Parse a graphics-section numeric attr. `$`/`0x` prefix → hex; bare → dec.
+    `$BB:AAAA` colons are stripped (matches project.toml offset convention)."""
+    if v is None:
+        return None
+    s = str(v).strip().replace("_", "")
+    if not s:
+        return None
+    if s.startswith("$"):
+        return int(s.replace(":", "")[1:], 16)
+    if s.lower().startswith("0x"):
+        return int(s, 16)
+    return int(s, 10)
+
+
+def _handle_graphics_png(rom: bytearray, section: Section, root: Path) -> WriteRange:
+    """PNG → SuperFamiconv tiles (+ optional projected tilemap), written into the
+    ROM. Lets edited word-art / UI graphics round-trip back in at build time.
+
+    Section attrs (all optional unless noted):
+      file=          one .png (required)         offset=        tiles dest (required)
+      bpp=2|4|8 (4)  color-zero=RRGGBB           no-flip=bool   tile-count=N (pad tiles)
+      format=tiles|tilemap (auto: tilemap when map-offset set)
+    Tilemap projection (format=tilemap):
+      map-offset=    dest of the 16-bit entries (required)
+      tile-base=     added to tile indices (VRAM tile slot the DMA targets)
+      map-cols=      dest tilemap stride        (default 32)
+      map-entries=   dest tilemap entry count   (default 1024)
+      map-base-entry= dest entry of top-left cell (default 0)
+      priority=bool  force priority bit
+      palette-anchors= "P:RRGGBB,P:RRGGBB" — map each SuperFamiconv subpalette
+                       (identified by which one contains the anchor colour) to
+                       SNES palette number P. Omit → subpalette index used as-is.
+    """
+    from retrotool.graphics import (
+        encode_png, grouped_palette_bytes, png_palette_rgb, project_tilemap,
+    )
+
+    if section.offset is None:
+        raise HandlerError(f"{section.source}: <graphics> png requires offset")
+    if len(section.files) != 1:
+        raise HandlerError(f"{section.source}: <graphics> png requires exactly one file=")
+    png = _resolve(Path(str(section.files[0])), root)
+    if not png.exists():
+        raise HandlerError(f"{section.source}: file not found: {png}")
+
+    a = section.attrs
+    bpp = _attr_hex(a.get("bpp")) or 4
+    colors = _attr_hex(a.get("colors")) or (4 if bpp == 2 else 16)
+    palettes = _attr_hex(a.get("palettes")) or 8
+    no_flip = (a.get("no-flip") or "").lower() in ("1", "true", "yes", "on")
+    # palette-from-png: pack against the indexed PNG's OWN palette order so tile
+    # pixel indices line up with a ROM's fixed CGRAM (SuperFamiconv would
+    # otherwise re-sort colours). PLTE laid out as [shared idx0] + (colors-1)
+    # colours per subpalette; `palettes` selects how many subpalettes to take.
+    fixed_palette = None
+    if (a.get("palette-from-png") or "").lower() in ("1", "true", "yes", "on"):
+        fixed_palette = grouped_palette_bytes(
+            png_palette_rgb(png), subpalettes=palettes, colors_per=colors)
+    enc = encode_png(png, bpp=bpp, colors=colors, palettes=palettes,
+                     color_zero=a.get("color-zero"), no_flip=no_flip,
+                     fixed_palette=fixed_palette)
+
+    tile_bytes = bpp * 8
+    tiles = enc.tiles
+    tile_count = _attr_hex(a.get("tile-count"))
+    if tile_count is not None:
+        want = tile_count * tile_bytes
+        if len(tiles) > want:
+            raise HandlerError(
+                f"{section.source}: {len(tiles)//tile_bytes} tiles exceed "
+                f"tile-count={tile_count} (raise tile-count / the DMA budget, or "
+                f"simplify the art / allow flips)")
+        tiles = tiles.ljust(want, b"\x00")
+
+    grow = (section.grow or "replace").lower()
+    allow_grow = grow == "insert"
+    written = [_write(rom, section.offset, tiles, allow_grow=allow_grow,
+                      source=section.source or "")]
+
+    map_off = _attr_hex(a.get("map-offset"))
+    fmt = (a.get("format") or ("tilemap" if map_off is not None else "tiles")).lower()
+    if fmt == "tilemap":
+        if map_off is None:
+            raise HandlerError(f"{section.source}: format=tilemap requires map-offset")
+        # subpalette -> SNES palette via anchor colours
+        palette_remap = None
+        anchors = a.get("palette-anchors")
+        if anchors:
+            palette_remap = {}
+            for pair in anchors.split(","):
+                pnum, _, rgb = pair.strip().partition(":")
+                rgb = rgb.strip().lstrip("#")
+                target = (int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16))
+                for sub in range(8):
+                    if target in enc.subpalette_colors(sub):
+                        palette_remap[sub] = int(pnum)
+                        break
+                else:
+                    raise HandlerError(
+                        f"{section.source}: palette-anchor {pair!r} colour not found "
+                        f"in any subpalette")
+        # blank source tiles (all pixels transparent) -> leave entry $0000
+        skip_tiles = {i for i in range(len(enc.tiles) // tile_bytes)
+                      if not any(enc.tiles[i * tile_bytes:(i + 1) * tile_bytes])}
+        map_bytes = project_tilemap(
+            enc.entries, enc.cols, enc.rows,
+            tile_base=_attr_hex(a.get("tile-base")) or 0,
+            base_entry=_attr_hex(a.get("map-base-entry")) or 0,
+            dest_cols=_attr_hex(a.get("map-cols")) or 32,
+            dest_entries=_attr_hex(a.get("map-entries")) or 1024,
+            palette_remap=palette_remap,
+            force_priority=(a.get("priority") or "").lower() in ("1", "true", "yes", "on"),
+            skip_tiles=skip_tiles,
+        )
+        written.append(_write(rom, map_off, map_bytes, allow_grow=allow_grow,
+                              source=section.source or ""))
+    return written if len(written) > 1 else written[0]
+
+
 def handle_graphics(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
-    """Tile/palette/tilemap data. Phase 3 wires raw planar passthrough; bitplane
-    repacking (e.g. MBuild's "2bpp-to-1bpp-il") lands in a later phase."""
+    """Tile/palette/tilemap data.
+
+    Two input modes:
+      * `.png` file (or `format=`/`map-offset=` set) — SuperFamiconv encode →
+        tiles + optional projected tilemap (see `_handle_graphics_png`).
+      * raw planar binary — written through (identity bitplane only; named
+        transforms like MBuild's "2bpp-to-1bpp-il" land later).
+    """
     if section.offset is None:
         raise HandlerError(f"{section.source}: <graphics> requires offset")
+    is_png = bool(section.files) and str(section.files[0]).lower().endswith(".png")
+    if is_png or section.attrs.get("format") or section.attrs.get("map-offset"):
+        return _handle_graphics_png(rom, section, root)
     data = _read_concat(section, root)
     if not _is_identity_bitplane(section.codec):
         raise HandlerError(
@@ -707,6 +837,39 @@ def _pc_to_lorom_within_bank(pc: int) -> int:
     return (pc & 0x7FFF) | 0x8000
 
 
+def _pc_to_hirom_bytes(pc: int) -> bytes:
+    """24-bit HiROM SNES address, little-endian. Bank = (pc>>16) | 0xC0."""
+    bank = ((pc >> 16) & 0x3F) | 0xC0
+    addr = pc & 0xFFFF
+    return bytes([addr & 0xFF, (addr >> 8) & 0xFF, bank & 0xFF])
+
+
+def _pc_to_hirom_within_bank(pc: int) -> int:
+    """16-bit within-bank HiROM address (bank implicit, full 64KB bank)."""
+    return pc & 0xFFFF
+
+
+def _select_24bit_encoder(addr_type: int) -> Callable[[int], bytes]:
+    """Pick the PC→24-bit SNES address encoder matching the section's mapping.
+
+    Used by relocate-mode pointer-table emission and `[HHHH@N]` fixup
+    resolution when no explicit `overflow.pointer-encoder` is configured.
+    """
+    if addr_type == SFCAddressType.HIROM:
+        return _pc_to_hirom_bytes
+    if addr_type == SFCAddressType.LOROM2:
+        return _pc_to_lorom0_bytes
+    # LOROM1 / EXHIROM / EXLOROM / unset → default LoROM1 (original behavior).
+    return _pc_to_lorom1_bytes
+
+
+def _select_16bit_within_bank(addr_type: int) -> Callable[[int], int]:
+    """Pick the PC→16-bit-within-bank encoder matching the section's mapping."""
+    if addr_type == SFCAddressType.HIROM:
+        return _pc_to_hirom_within_bank
+    return _pc_to_lorom_within_bank
+
+
 def _ensure_room(rom: bytearray, end: int) -> None:
     if end > len(rom):
         rom.extend(b"\x00" * (end - len(rom)))
@@ -968,9 +1131,11 @@ def handle_script(
     if slot_measure == "source-entry" and _source_snapshot is None:
         _source_snapshot = bytes(rom)
     # Pointer-encoder applied to `[HHHH@N[:label]]` and `[HHHH@@name]` fixup
-    # resolution. Defaults to SNES LoROM1 24-bit LE to match the encoder's
-    # 3-byte placeholder. Overridable via `section.overflow.pointer-encoder`.
-    fixup_pointer_encoder: Callable[[int], bytes] = _pc_to_lorom1_bytes
+    # resolution. Defaults to the section's address-type 24-bit encoder
+    # (LoROM1 by default, HiROM when the ROM is HiROM, etc.) so the encoder's
+    # 3-byte placeholder resolves correctly regardless of mapping mode.
+    # Overridable via `section.overflow.pointer-encoder`.
+    fixup_pointer_encoder: Callable[[int], bytes] = _select_24bit_encoder(addr_type)
     if section.overflow is not None:
         enc_name = section.overflow.get("pointer-encoder")
         if enc_name:
@@ -989,22 +1154,33 @@ def handle_script(
     bank_hi = ptr_tbl_bank if ptr_size == 2 else 0
     sentinel_raw: dict[int, bytes] = {}
     src_pc: dict[int, int] = {}
-    zero_slot = b"\x00" * ptr_size
-    for i in range(count):
-        raw = src_ptr_bytes[i * ptr_size:(i + 1) * ptr_size]
-        if raw == zero_slot:
-            # Fresh/blank ptr table — nothing to carry through. Fall through
-            # to sequential packing.
-            continue
-        if ptr_size == 3:
-            snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
-        else:
-            snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
-        pc = SFCAddress(snes, addr_type).get_address(SFCAddressType.PC)
-        if pc is None:
-            sentinel_raw[i] = raw
-        else:
-            src_pc[i] = pc
+    # When emitting 24-bit pointers, the source ROM's pointer table is
+    # typically still 2-byte (this is the migration case). Reading the source
+    # bytes at 3-byte stride produces nonsense (bytes from adjacent old
+    # entries get reinterpreted as ill-formed 24-bit ptrs) — half the entries
+    # decode to invalid addresses and get marked sentinel, leaving stale
+    # source bytes in the output table. The 24-bit fast path doesn't use
+    # src_pc or sentinel_raw, so skip the source parse entirely when
+    # ptr_size == 3. (Future: add an explicit `source-pointer-size` config
+    # for genuine 24-bit→24-bit rebuilds.)
+    if ptr_size != 3:
+        zero_slot = b"\x00" * ptr_size
+        for i in range(count):
+            raw = src_ptr_bytes[i * ptr_size:(i + 1) * ptr_size]
+            if raw == zero_slot:
+                # Fresh/blank ptr table — nothing to carry through. Fall through
+                # to sequential packing.
+                continue
+            if ptr_size == 3:
+                snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
+            else:
+                snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
+            pc = SFCAddress(snes, addr_type).get_address(SFCAddressType.PC)
+            if pc is None:
+                sentinel_raw[i] = raw
+            else:
+                src_pc[i] = pc
+
 
     writes: list[WriteRange] = []
     ptrs: list[Optional[int]] = []
@@ -1055,6 +1231,25 @@ def handle_script(
     data_end_pc: Optional[int] = None
     if section.data_end is not None:
         data_end_pc = SFCAddress(section.data_end, addr_type).get_address(SFCAddressType.PC)
+    # Snapshot of the source data region so KEEPING ORIGINAL can restore the
+    # untouched JP bytes at src_pc[i] after sequential packing may have
+    # clobbered them. Without this, a "kept" entry's pointer still resolves
+    # to garbage (corrupted by an earlier entry's write at that PC) — the
+    # engine reads no proper control-code prefix → bad VRAM writes → crash.
+    data_region_snapshot: Optional[bytes] = None
+    data_region_start: Optional[int] = None
+    if data_end_pc is not None and src_pc:
+        data_region_start = data_start
+        data_region_snapshot = bytes(rom[data_start:data_end_pc])
+    # Each entry needs to end with the section's terminator byte (rbshura: $FF,
+    # LM3: $00). The encoder produces text up to the END opcode but doesn't
+    # emit the standalone terminator that the engine's byte-walker requires to
+    # know where one entry stops and the next begins. When entries are packed
+    # contiguously in relocate mode, the walker reads through entry N right
+    # into entry N+1's bytes as one giant entry → control codes processed in
+    # the wrong context → bad VRAM writes → crash. Append the terminator after
+    # each entry's encoded data to restore the separator.
+    term_byte = section.terminator if section.terminator is not None else 0xFF
     cur = data_start
     for i, (enc, orig_addr, ent_fixups, ent_labels, force_overflow) in enumerate(entries):
         if i in sentinel_raw:
@@ -1072,6 +1267,47 @@ def handle_script(
         if is_dup:
             pc = seen_addrs[orig_addr]
             ptrs.append(pc)
+            continue
+
+        # Append terminator byte if entry doesn't already end with it. Engines
+        # like rbshura's expect a standalone terminator between entries; the
+        # encoder drops it because the source `[F7][FF][FB][15]` text already
+        # represents the entry "end" semantically via the END opcode.
+        if enc and enc[-1] != term_byte:
+            enc = enc + bytes([term_byte])
+
+        # 24-bit pointer fast path: with 3-byte L4 entries the runtime engine
+        # follows the pointer to any ROM bank, so each entry can live wherever
+        # there is freespace — no [data]-region sequential packing, no source
+        # slot to fit into, no KEEPING_ORIGINAL fallback. The pointer table
+        # entry resolves to the freespace PC directly. Requires the project
+        # to supply a freespace pool via [rom.build].freespace.
+        if ptr_size == 3:
+            if ctx is None or ctx.allocator is None:
+                raise HandlerError(
+                    f"{section.source}: pointer-size=3 (24-bit pointers) "
+                    f"requires a [rom.build].freespace pool for entry "
+                    f"allocation, but no allocator is available."
+                )
+            alloc_pc = ctx.allocator.alloc(len(enc))
+            if alloc_pc is None:
+                raise HandlerError(
+                    f"{section.source}: pointer-size=3 — entry {i} "
+                    f"({len(enc)}B) does not fit any freespace block."
+                )
+            _ensure_room(rom, alloc_pc + len(enc))
+            rom[alloc_pc:alloc_pc + len(enc)] = enc
+            writes.append(WriteRange(offset=alloc_pc, length=len(enc)))
+            entry_pc[i] = alloc_pc
+            ptrs.append(alloc_pc)
+            if orig_addr is not None:
+                seen_addrs[orig_addr] = alloc_pc
+            if i in src_pc:
+                seen_src_pc.setdefault(src_pc[i], alloc_pc)
+            if ent_labels:
+                entry_labels_pc[i] = {n: alloc_pc + off for n, off in ent_labels.items()}
+            for fx in ent_fixups:
+                pending.append((alloc_pc + fx.offset, fx))
             continue
 
         pc = src_pc.get(i, cur)
@@ -1141,6 +1377,27 @@ def handle_script(
             if data_end_pc is not None and pc + len(enc) > data_end_pc:
                 if i in src_pc:
                     # Keep the original pointer + original ROM bytes.
+                    # Restore the source bytes at src_pc[i] in case an
+                    # earlier sequential packing has clobbered them — the
+                    # engine will read from src_pc[i] at runtime and must
+                    # see the original JP control-code-prefixed entry,
+                    # not whatever EN tail happened to land there.
+                    if (data_region_snapshot is not None
+                            and data_region_start is not None
+                            and src_pc[i] >= data_region_start
+                            and src_pc[i] < data_end_pc):
+                        # Walk source extent: until the section terminator.
+                        snap_off = src_pc[i] - data_region_start
+                        snap_end = snap_off
+                        while (snap_end < len(data_region_snapshot)
+                               and data_region_snapshot[snap_end] != term_byte):
+                            snap_end += 1
+                        snap_end = min(snap_end + 1, len(data_region_snapshot))
+                        restore_len = snap_end - snap_off
+                        rom[src_pc[i]:src_pc[i] + restore_len] = (
+                            data_region_snapshot[snap_off:snap_end]
+                        )
+                        writes.append(WriteRange(offset=src_pc[i], length=restore_len))
                     entry_pc[i] = src_pc[i]
                     ptrs.append(src_pc[i])
                     if orig_addr is not None:
@@ -1149,7 +1406,8 @@ def handle_script(
                     print(
                         f"  WARNING: {section.source} entry {i} ({len(enc)}B) "
                         f"exceeds [data].end ${data_end_pc:06X}; KEEPING ORIGINAL "
-                        f"pointer ${src_pc[i]:06X} (entry remains untranslated)."
+                        f"pointer ${src_pc[i]:06X} (entry remains untranslated, "
+                        f"JP source bytes restored)."
                     )
                     continue
                 else:
@@ -1215,16 +1473,21 @@ def handle_script(
         _ensure_room(rom, rom_pc + len(addr))
         rom[rom_pc:rom_pc + len(addr)] = addr
 
-    # Emit pointer table.
-    _ensure_room(rom, ptr_tbl_pc + ptr_tbl_len)
+    # Emit pointer table. Pick the encoder based on the section's address
+    # type — LoROM1 (default), HiROM, LoROM0 etc. all need different bank-byte
+    # arithmetic. Without this dispatch a HiROM section emitting 24-bit ptrs
+    # would write LoROM1-style addresses ($80-$FF or $00-$7F banks with $8000
+    # offset) instead of HiROM-style ($C0-$FF banks with full $0000-$FFFF).
+    emit_24bit = _select_24bit_encoder(addr_type)
+    emit_16bit = _select_16bit_within_bank(addr_type)
     for i, pc in enumerate(ptrs):
         if pc is None:
             raw = sentinel_raw[i]
             rom[ptr_tbl_pc + i * ptr_size:ptr_tbl_pc + (i + 1) * ptr_size] = raw
         elif ptr_size == 3:
-            rom[ptr_tbl_pc + i * 3:ptr_tbl_pc + i * 3 + 3] = _pc_to_lorom1_bytes(pc)
+            rom[ptr_tbl_pc + i * 3:ptr_tbl_pc + i * 3 + 3] = emit_24bit(pc)
         else:
-            ptr16 = _pc_to_lorom_within_bank(pc)
+            ptr16 = emit_16bit(pc)
             rom[ptr_tbl_pc + i * 2] = ptr16 & 0xFF
             rom[ptr_tbl_pc + i * 2 + 1] = (ptr16 >> 8) & 0xFF
     writes.insert(0, WriteRange(offset=ptr_tbl_pc, length=ptr_tbl_len))
@@ -1260,6 +1523,126 @@ def _looks_like_fixed_script(data: bytes) -> bool:
     return b"<<$" in head
 
 
+def _coerce_file_offset(v) -> int:
+    """Accept either an int or a string like '$1FC5A7' / '0x1FC5A7' / '1FC5A7'
+    and return a file-offset int. Mirrors the front-end `_parse_offset`
+    semantics; lives here so handler-side fields can reuse it without
+    re-importing the parser."""
+    if isinstance(v, int):
+        return v
+    s = str(v).strip().replace("_", "")
+    if s.startswith("$"):
+        return int(s[1:], 16)
+    if s.lower().startswith("0x"):
+        return int(s, 16)
+    try:
+        return int(s, 16)
+    except ValueError:
+        return int(s, 10)
+
+
+def _apply_field_ptr_writes(rom: bytearray, section, layout) -> list:
+    """For each `<<fields>>` entry that declares `ptr_writes`, write the
+    field's runtime address into one or more pointer-table slots. Avoids
+    hardcoding the field's location in a separate asar patch, so budget /
+    layout changes flow through automatically.
+
+    `layout` is the dict returned by `_pack_fixed_records` mapping each
+    label to `(actual_start, actual_len)`. We prefer that over the declared
+    `field['start']` because auto-pack mode resolves `start` at pack time.
+
+    Per-field config:
+
+        ptr_writes = [
+            { addr = "$1FC5A7", count = 25, size = 2, format = "within-bank" },
+        ]
+
+    - `addr`   (required) file offset where the first pointer goes.
+    - `count`  (required) how many consecutive pointers to write.
+    - `size`   (default 2) pointer width in bytes (2 or 3).
+    - `format` (default "within-bank") pointer value format:
+                 "within-bank" → low 16 bits of file offset (= within-bank
+                 address for HiROM banks $40-$7D / $C0-$FF or LoROM banks).
+                 Use 2-byte pointers with this.
+                 "file-offset" → raw N-byte little-endian file offset.
+                 "snes-24"     → reserved for future SNES-24 conversion
+                                 with mapping-mode awareness.
+
+    Returns a list of WriteRange covering every byte written, so the
+    gather-parallel driver captures them for re-apply against the real rom
+    (writes outside the section's main extent are otherwise lost). Raises
+    HandlerError on misconfiguration or out-of-bounds writes.
+    """
+    write_ranges: list = []
+    if not section.fields:
+        return write_ranges
+    sec_offset = section.offset
+    if sec_offset is None:
+        return write_ranges
+    if layout is None:
+        layout = {}
+    for field_dict in section.fields:
+        ptr_writes = (field_dict.get("ptr_writes")
+                      or field_dict.get("pointer_writes")
+                      or [])
+        if not ptr_writes:
+            continue
+        label = str(field_dict.get("label", "?"))
+        # Prefer the post-pack resolved start (auto-pack-aware) over the
+        # declared one. Fall back to declared start (or 0) for callers that
+        # don't pass a layout (legacy entry points / unit tests).
+        if label in layout:
+            field_start = int(layout[label][0])
+        else:
+            field_start = int(field_dict.get("start", 0))
+        field_file_offset = sec_offset + field_start
+        for i, pw in enumerate(ptr_writes):
+            if not isinstance(pw, dict) or "addr" not in pw or "count" not in pw:
+                raise HandlerError(
+                    f"{section.source}: field {label!r} ptr_writes[{i}] needs "
+                    f"`addr` and `count` keys (got {pw!r})"
+                )
+            pw_addr = _coerce_file_offset(pw["addr"])
+            pw_count = int(pw["count"])
+            pw_size = int(pw.get("size", 2))
+            pw_format = str(pw.get("format", "within-bank"))
+            if pw_size not in (2, 3):
+                raise HandlerError(
+                    f"{section.source}: field {label!r} ptr_writes[{i}].size "
+                    f"must be 2 or 3, got {pw_size}"
+                )
+            # Compute the pointer value.
+            if pw_format == "within-bank":
+                value = field_file_offset & 0xFFFF
+                if pw_size != 2:
+                    raise HandlerError(
+                        f"{section.source}: field {label!r} ptr_writes[{i}] "
+                        f"format='within-bank' implies size=2; got size={pw_size}"
+                    )
+            elif pw_format == "file-offset":
+                value = field_file_offset
+            else:
+                raise HandlerError(
+                    f"{section.source}: field {label!r} ptr_writes[{i}] "
+                    f"unknown format {pw_format!r} (supported: 'within-bank', "
+                    f"'file-offset')"
+                )
+            # Emit `count` copies of the pointer at consecutive offsets.
+            encoded = value.to_bytes(pw_size, "little", signed=False)
+            total_bytes = pw_count * pw_size
+            if pw_addr + total_bytes > len(rom):
+                raise HandlerError(
+                    f"{section.source}: field {label!r} ptr_writes[{i}] writes "
+                    f"{total_bytes}b at {pw_addr:#x} which exceeds ROM size "
+                    f"{len(rom):#x}"
+                )
+            for k in range(pw_count):
+                dest = pw_addr + k * pw_size
+                rom[dest:dest + pw_size] = encoded
+            write_ranges.append(WriteRange(offset=pw_addr, length=total_bytes))
+    return write_ranges
+
+
 def _pack_fixed_records(
     text: str,
     base: bytes,
@@ -1270,14 +1653,25 @@ def _pack_fixed_records(
     table,
     fallback_table,
     source: str,
-) -> bytes:
+) -> tuple[bytes, dict[str, tuple[int, int]]]:
     """Pack a `<<$HEX:idx.label>>`-delimited script into `stride * count`
     bytes. Non-field bytes inside each record are preserved from `base`
     (caller passes the existing ROM slice at data_offset..+stride*count).
 
-    Field schema: each dict must have keys `label`, `start`, `len`; `fill`
-    defaults to 0x20 (space). Entries with idx ≥ count, or label not in the
-    schema, raise HandlerError."""
+    Field schema: each dict must have key `label`; `start` and `len` are
+    optional with auto-pack semantics:
+      * `len` omitted → field auto-sizes to its encoded content length
+        (no upper bound except the enclosing block size).
+      * `start` omitted → field is placed immediately after the previous
+        field in declaration order (first field defaults to start=0).
+      * Auto-pack mode requires `count == 1` because each record's per-field
+        layout would otherwise depend on its specific content (illegal for
+        a fixed-stride table).
+    `fill` defaults to 0x20 (space). Entries with idx ≥ count, or label not
+    in the schema, raise HandlerError. Returns `(buf, layout)` where layout
+    maps each label to its `(actual_start, actual_len)` so callers (e.g.
+    `_apply_field_ptr_writes`) can resolve auto-computed offsets without
+    re-deriving them."""
     import re as _re
 
     global _FIXED_HEADER_RE
@@ -1286,22 +1680,32 @@ def _pack_fixed_records(
 
     # Build label→field lookup; validate field schema once.
     field_by_label: dict[str, dict] = {}
+    field_order: list[str] = []
+    any_auto = False
     for f in fields:
-        if "label" not in f or "start" not in f or "len" not in f:
+        if "label" not in f:
             raise HandlerError(
-                f"{source}: fixed-records field schema missing label/start/len: {f!r}"
+                f"{source}: fixed-records field schema missing label: {f!r}"
             )
-        field_by_label[str(f["label"])] = {
-            "start": int(f["start"]),
-            "len": int(f["len"]),
+        label = str(f["label"])
+        decl_start = f.get("start")
+        decl_len = f.get("len")
+        if decl_start is None or decl_len is None:
+            any_auto = True
+        field_by_label[label] = {
+            "decl_start": None if decl_start is None else int(decl_start),
+            "decl_len":   None if decl_len   is None else int(decl_len),
             "fill": int(f.get("fill", 0x20)),
         }
+        field_order.append(label)
 
-    buf = bytearray(base)
-    if len(buf) != stride * count:
-        # Caller gave a short base (e.g. ROM smaller than table region).
-        # Extend with the first-field fill or 0xFF as a safe default.
-        buf.extend(b"\xff" * (stride * count - len(buf)))
+    if any_auto and count != 1:
+        raise HandlerError(
+            f"{source}: auto-pack fields (omitting `start` or `len`) require "
+            f"count=1; got count={count}. Fixed-stride tables with N>1 "
+            f"records need explicit per-field offsets so every record has "
+            f"the same layout."
+        )
 
     from retrotool.script.encode import encode_text as _encode_text
     from retrotool.script.table import load_table as _load_t
@@ -1311,8 +1715,9 @@ def _pack_fixed_records(
     if fallback_table is not None:
         fb_tbl = fallback_table if hasattr(fallback_table, "char_map") else _load_t(str(fallback_table))
 
-    # Parse `<<...>>` blocks. Split on `<<` and take everything up to `>>`
-    # as the header, rest as content until the next `<<`.
+    # First pass: encode all text blocks. Store by (idx, label) so we can
+    # then resolve per-record layouts in field-declaration order.
+    encoded_by_key: dict[tuple[int, str], bytes] = {}
     for entry in text.split("<<")[1:]:
         if ">>" not in entry:
             continue
@@ -1329,21 +1734,88 @@ def _pack_fixed_records(
             raise HandlerError(
                 f"{source}: entry {idx} exceeds count={count}"
             )
-        field = field_by_label.get(label)
-        if field is None:
+        if label not in field_by_label:
             raise HandlerError(
-                f"{source}: entry {idx} references unknown field label {label!r} "
-                f"(known: {sorted(field_by_label)!r})"
+                f"{source}: entry {idx} references unknown field label "
+                f"{label!r} (known: {sorted(field_by_label)!r})"
             )
         encoded, _fixups, _labels = _encode_text(content, tbl, fallback_table=fb_tbl)
-        field_len = field["len"]
-        if len(encoded) > field_len:
-            encoded = encoded[:field_len]
-        padded = encoded + bytes([field["fill"]]) * (field_len - len(encoded))
-        rec_off = idx * stride + field["start"]
-        buf[rec_off:rec_off + field_len] = padded
+        encoded_by_key[(idx, label)] = encoded
 
-    return bytes(buf)
+    # Second pass: resolve each record's layout in field-declaration order
+    # so auto-pack `start` chains correctly. For count>1, all fields must
+    # have declared start/len (any_auto would have raised above).
+    resolved_layout: dict[str, tuple[int, int]] = {}
+    auto_stride = 0
+    for idx in range(count):
+        prev_end = 0
+        for label in field_order:
+            decl = field_by_label[label]
+            encoded = encoded_by_key.get((idx, label), b"")
+            actual_start = decl["decl_start"] if decl["decl_start"] is not None else prev_end
+            actual_len = decl["decl_len"] if decl["decl_len"] is not None else len(encoded)
+            if decl["decl_len"] is not None and len(encoded) > actual_len:
+                # Hard-fail on overflow rather than silently truncating.
+                # See the rationale on the matching error below the loop.
+                raise HandlerError(
+                    f"{source}: field {label!r} entry {idx} encodes to "
+                    f"{len(encoded)} B but budget is {actual_len} B "
+                    f"(overflow by {len(encoded) - actual_len} B). Increase "
+                    f"the field's `len` in the DataDef (or omit it to use "
+                    f"auto-pack), trim the source text, or split content "
+                    f"across additional fields."
+                )
+            field_end = actual_start + actual_len
+            if idx == 0:
+                # Record only the first record's layout — callers use it
+                # for ptr_writes; subsequent records share the same shape
+                # because auto-pack is disallowed for count>1.
+                resolved_layout[label] = (actual_start, actual_len)
+            if field_end > auto_stride:
+                auto_stride = field_end
+            prev_end = field_end
+
+    # When `stride` was given by the caller as the auto-derived value (i.e.
+    # all fields had explicit len), use it. Otherwise, expand to fit the
+    # auto-packed content. Either way, validate against the block boundary.
+    effective_stride = stride if stride is not None else auto_stride
+    if effective_stride < auto_stride:
+        raise HandlerError(
+            f"{source}: packed fields span {auto_stride} B but declared "
+            f"block_len/stride is {effective_stride} B. Increase block_len "
+            f"or shorten the source text."
+        )
+    if stride is not None and any_auto:
+        # Caller declared stride but at least one field is auto-sized.
+        # Honor the caller's stride as the *upper bound* — auto-fields can
+        # be smaller. Already validated effective_stride >= auto_stride.
+        effective_stride = stride
+
+    buf = bytearray(base)
+    if len(buf) != effective_stride * count:
+        # Caller gave a short base (e.g. ROM smaller than table region).
+        # Extend with the first-field fill or 0xFF as a safe default.
+        target_len = effective_stride * count
+        if len(buf) < target_len:
+            buf.extend(b"\xff" * (target_len - len(buf)))
+        else:
+            buf = buf[:target_len]
+
+    # Third pass: write encoded content + fill into buf at the resolved
+    # offsets. Same per-record loop but now buf is sized correctly.
+    for idx in range(count):
+        prev_end = 0
+        for label in field_order:
+            decl = field_by_label[label]
+            encoded = encoded_by_key.get((idx, label), b"")
+            actual_start = decl["decl_start"] if decl["decl_start"] is not None else prev_end
+            actual_len = decl["decl_len"] if decl["decl_len"] is not None else len(encoded)
+            padded = encoded + bytes([decl["fill"]]) * (actual_len - len(encoded))
+            rec_off = idx * effective_stride + actual_start
+            buf[rec_off:rec_off + actual_len] = padded
+            prev_end = actual_start + actual_len
+
+    return bytes(buf), resolved_layout
 
 
 def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
@@ -1382,14 +1854,34 @@ def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Opti
                 f"like a text script but section has no field schema "
                 f"(define [[fields]] in the DataDef)"
             )
-        if stride is None or count is None:
+        if count is None:
             raise HandlerError(
                 f"{section.source}: text-mode fixed-records requires "
-                f"stride+count (from DataDef's block_len + entries/pointers)"
+                f"count (from DataDef's entries/pointers)"
             )
-        # Grow the working buffer so we can read a base slice even for
-        # fresh (zero-length) regions.
-        total = stride * count
+        # `stride` (= block_len) is optional in auto-pack mode where every
+        # field omits `len` — handle_fixed_records derives an effective
+        # stride post-pack. Multi-record tables (count>1) still need an
+        # explicit stride for uniform per-record layout.
+        if stride is None and count != 1:
+            raise HandlerError(
+                f"{section.source}: text-mode fixed-records with count>1 "
+                f"requires stride (from DataDef's block_len). Auto-pack "
+                f"(no stride) is only legal for count=1."
+            )
+        # Grow the working buffer so we can read a base slice. For auto-pack
+        # mode (any field omits `start`/`len`), stride may be unknown until
+        # after packing — start with whatever the caller declared (None →
+        # use `data.end - data.offset` as a reasonable upper bound), grow if
+        # needed after pack.
+        if stride is not None:
+            total = stride * count
+        else:
+            # Auto-pack with no declared block_len: use the gap between
+            # data.offset and data.end (or the rom tail if data.end isn't
+            # set) as the available envelope.
+            data_end = section.data_end or len(rom)
+            total = max(0, data_end - section.offset)
         end = section.offset + total
         if end > len(rom):
             if not allow_grow:
@@ -1414,7 +1906,7 @@ def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Opti
             _resolve(Path(str(section.fallback_table)), root)
             if section.fallback_table else None
         )
-        data = _pack_fixed_records(
+        data, layout = _pack_fixed_records(
             text, base_slice,
             stride=stride, count=count,
             fields=section.fields,
@@ -1422,8 +1914,33 @@ def handle_fixed_records(rom: bytearray, section: Section, root: Path, ctx: Opti
             fallback_table=fb_path,
             source=section.source or "",
         )
-        return _write(rom, section.offset, data,
-                      allow_grow=allow_grow, source=section.source or "")
+        # Enforce the data-region cap. With auto-pack, the encoded content
+        # might exceed `data.end - data.offset`; we surface that loudly
+        # rather than silently growing into a neighboring section.
+        if section.data_end is not None and section.offset + len(data) > section.data_end:
+            raise HandlerError(
+                f"{section.source}: packed fixed-records content is "
+                f"{len(data)} B but the data region "
+                f"{section.offset:#x}..{section.data_end:#x} is only "
+                f"{section.data_end - section.offset} B (overflow by "
+                f"{section.offset + len(data) - section.data_end} B). Expand "
+                f"[data].end (and the matching `freespace` split in the "
+                f"project file) or trim the source text."
+            )
+        write_result = _write(rom, section.offset, data,
+                              allow_grow=allow_grow, source=section.source or "")
+        # Auto-write any pointer-table references declared per field. Lets
+        # users avoid hardcoding a field's runtime location in a separate
+        # asar patch — if part1's len changes (so part2's offset moves), the
+        # pointers update on the next build instead of producing a silently-
+        # broken ROM. See `_apply_field_ptr_writes` for the supported config.
+        # Each pointer-write returns its own WriteRange so the gather-parallel
+        # driver captures those bytes (writes outside the main section extent
+        # would otherwise be discarded when re-applied to the real rom).
+        ptr_writes = _apply_field_ptr_writes(rom, section, layout)
+        if ptr_writes:
+            return [write_result, *ptr_writes]
+        return write_result
 
     # Pre-packed binary path.
     if stride is not None and count is not None:
