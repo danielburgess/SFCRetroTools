@@ -201,6 +201,13 @@ class BuildSpec:
     # Valid values match `project.schema._MAPPING_TO_ADDR_TYPE`: "lorom",
     # "lorom1", "lorom2", "hirom", "exlorom", "exhirom", "sa1".
     mapping: Optional[str] = None
+    # Default output directory for the built ROM, relative to the spec file
+    # (absolute paths are also honored). Parsed from `[rom.build].output_dir`
+    # (aliases: `out-dir`, `out_dir`). When set and the caller passes no
+    # explicit `output=`, the default output path becomes
+    # `<spec_dir>/<output_dir>/<rom name>.sfc`. `None` → output lands next to
+    # the spec file (the original behavior). An explicit `output=` always wins.
+    output_dir: Optional[str] = None
 
     def iter_kind(self, kind: SectionKind):
         return (s for s in self.sections if s.kind == kind)

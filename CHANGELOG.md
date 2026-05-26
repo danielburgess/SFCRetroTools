@@ -2,6 +2,22 @@
 
 ## 0.9.1 in progress
 
+### Default output directory (`[rom.build].output_dir`)
+
+`[rom.build]` now accepts `output_dir` (aliases: `out-dir`, `out_dir`). When set
+and no explicit `output=` is passed to `build_project()` (or `-o` to
+`retrotool build`), the built ROM lands at `<output_dir>/<rom.name>.sfc`,
+resolved relative to the spec file (absolute paths honored). The directory is
+created if missing. Unset → output next to the spec file, as before. An
+explicit `output=`/`-o` always wins.
+
+```toml
+[rom]
+name = "mygame_en"
+[rom.build]
+output_dir = "out"      # → out/mygame_en.sfc
+```
+
 ### Build-time PNG graphics encode (`<graphics>` / `kind="graphics"`)
 
 `<graphics>` sections now accept a `.png` `file=` (or any `format=`/`map-offset=`

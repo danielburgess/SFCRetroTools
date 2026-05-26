@@ -110,6 +110,18 @@ def _coerce_jobs(v: Any, field: str) -> Optional[int]:
     return n
 
 
+def _coerce_output_dir(mb: dict) -> Optional[str]:
+    """Read `[rom.build].output_dir` (aliases `out-dir`, `out_dir`). Returns a
+    non-empty string or None. Used to derive the default output path when the
+    caller passes no explicit `output=`."""
+    v = mb.get("output_dir", mb.get("out-dir", mb.get("out_dir")))
+    if v is None:
+        return None
+    if not isinstance(v, str) or not v.strip():
+        raise SchemaError("[rom.build].output_dir must be a non-empty string path")
+    return v.strip()
+
+
 def _coerce_tristate_bool(v: Any, field: str) -> Optional[bool]:
     """None/missing → None; bool → bool; truthy/falsy str or int → bool.
     Used for attrs where absence must be distinguishable from explicit false."""
@@ -264,6 +276,7 @@ def parse_project_toml_dict(
         vars=vars,
         jobs=_coerce_jobs(mb.get("jobs"), "[rom.build].jobs"),
         mapping=rom_mapping,
+        output_dir=_coerce_output_dir(mb),
     )
 
     fs = mb.get("freespace", [])

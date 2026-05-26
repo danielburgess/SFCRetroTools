@@ -153,11 +153,18 @@ def parse_csv_set(s: Union[str, set[str], list[str], None]) -> Optional[set[str]
 # ---- Defaults the CLI computes; library callers want them too -------------
 
 def default_output_path(spec, spec_file: Path) -> Path:
-    """Match `retrotool build` default: `<spec.name or spec.stem>.sfc` next
-    to the spec file.
+    """Default output: `<spec.name or spec.stem>.sfc`.
+
+    Honors `[rom.build].output_dir` when set — the ROM lands in
+    `<spec_dir>/<output_dir>/<name>.sfc` (an absolute `output_dir` is used
+    as-is). Otherwise the file is placed next to the spec file, preserving
+    the original behavior. An explicit `output=` to `build_project()` always
+    overrides this.
     """
     name = spec.name or spec_file.stem
-    return spec_file.parent / f"{name}.sfc"
+    out_dir = getattr(spec, "output_dir", None)
+    base = spec_file.parent / out_dir if out_dir else spec_file.parent
+    return base / f"{name}.sfc"
 
 
 def default_cache_dir(source_root: Path) -> Path:
@@ -378,6 +385,7 @@ def build_project(
         spec.diff = diff
     source_root = spec_file.parent
     out = Path(output) if output else default_output_path(spec, spec_file)
+    out.parent.mkdir(parents=True, exist_ok=True)  # ensure [rom.build].output_dir exists
     cache = None if no_cache else BuildCache(default_cache_dir(source_root))
     resolved_jobs = resolve_jobs(jobs, spec.jobs)
     summary_out = _resolve_stream(summary_stream, "stdout")
