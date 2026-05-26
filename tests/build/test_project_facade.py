@@ -86,6 +86,37 @@ def test_default_paths(tmp_path):
     assert default_cache_dir(tmp_path) == tmp_path / ".cache"
 
 
+@pytest.mark.parametrize("key", ["output_dir", "out-dir", "out_dir"])
+def test_default_output_dir(tmp_path, key):
+    """`[rom.build].output_dir` (and its aliases) redirects the default
+    output path into that folder, relative to the spec file."""
+    rom_path = _make_lorom(tmp_path)
+    (tmp_path / "project.toml").write_text(textwrap.dedent(f"""
+        [rom]
+        name = "demo"
+        file = "{rom_path.name}"
+        [rom.build]
+        {key} = "out"
+    """))
+    spec, spec_file = load_spec(tmp_path)
+    assert spec.output_dir == "out"
+    assert default_output_path(spec, spec_file) == tmp_path / "out" / "demo.sfc"
+
+
+def test_build_project_creates_output_dir(tmp_path):
+    """build_project() honors output_dir end-to-end and creates the folder."""
+    _project_with_rep(tmp_path)
+    (tmp_path / "project.toml").write_text(
+        (tmp_path / "project.toml").read_text().replace(
+            "[rom.build]", '[rom.build]\noutput_dir = "out"', 1
+        )
+    )
+    result = build_project(path=tmp_path, no_cache=True, no_progress=True,
+                           print_summary=False)
+    assert (tmp_path / "out" / "demo.sfc").exists()
+    assert isinstance(result, BuildResult)
+
+
 # ---- build_project --------------------------------------------------------
 
 def _project_with_rep(tmp_path: Path) -> Path:
