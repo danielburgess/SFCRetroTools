@@ -93,10 +93,11 @@ def test_apply_bass_patch_uses_bundled_binary(tmp_path):
     asm = tmp_path / "p.asm"
     asm.write_text(
         "arch snes.cpu\n"
-        "output \"out.sfc\", create\n"
-        "// `output` is a no-op when bass runs in modify mode (-m); the\n"
-        "// patcher passes `-m <out>`, so the working file is the target.\n"
-        "org $008000\n"
+        "// bass (byuu lineage) uses `origin` (file offset) + `base` (program\n"
+        "// counter), NOT the asar/ca65 `org`. The patcher passes `-m <out>`,\n"
+        "// so `origin 0` writes at file offset 0 of the target ROM.\n"
+        "origin 0\n"
+        "base $8000\n"
         "db $42, $43, $44\n"
     )
     out = tmp_path / "out.sfc"
@@ -112,11 +113,10 @@ def test_run_bass_helper_invokes_binary():
     """`run_bass` is the convenience wrapper; verify it forwards args to
     the bundled binary and returns a CompletedProcess."""
     from retrotool_bass import run_bass
-    # `bass --help` doesn't exist (any unknown flag triggers the error
-    # path), but invoking with `-strict` and no source still hits the
-    # binary. Use check=False since bass exits non-zero with no source.
-    proc = run_bass([], check=False)
+    # Invoking bass with no source still hits the binary and prints its
+    # "bass v18" banner. Capture output (otherwise stdout/stderr are None);
+    # check=False since bass exits non-zero with no source file.
+    proc = run_bass([], check=False, capture_output=True)
     assert isinstance(proc, subprocess.CompletedProcess)
-    assert "bass v18" in (proc.stdout + proc.stderr).decode(
-        "utf-8", errors="replace"
-    ) if isinstance(proc.stdout, bytes) else (proc.stdout + proc.stderr)
+    combined = (proc.stdout or b"") + (proc.stderr or b"")
+    assert b"bass v18" in combined
