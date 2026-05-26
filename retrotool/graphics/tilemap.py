@@ -55,6 +55,59 @@ def decode_tilemap(data: bytes, offset: int, width: int, height: int) -> list[li
     return out
 
 
+def project_tilemap(
+    entries: Sequence[TilemapEntry],
+    src_cols: int,
+    src_rows: int,
+    *,
+    tile_base: int = 0,
+    base_entry: int = 0,
+    dest_cols: int = 32,
+    dest_entries: int = 1024,
+    palette_remap: dict[int, int] | None = None,
+    force_priority: bool = False,
+    skip_tiles: set[int] | None = None,
+) -> bytes:
+    """Place a small `src_cols`x`src_rows` tilemap (flat, row-major `entries`)
+    into a larger destination tilemap stream, returning `dest_entries`*2 bytes.
+
+    For engines that DMA a fixed window of a BG tilemap (the rest stays blank),
+    this re-projects a freshly-encoded plate into the right window:
+
+      * `tile_base`     added to every tile index (e.g. the VRAM tile slot a
+                        DMA loads into — SuperFamiconv emits 0-based indices).
+      * `base_entry`    destination entry index of the plate's top-left cell.
+      * `dest_cols`     destination tilemap stride (row width in entries).
+      * `palette_remap` map source (SuperFamiconv subpalette) -> SNES palette #.
+      * `force_priority` OR the priority bit onto every placed entry.
+      * `skip_tiles`    source tile indices (pre-`tile_base`) left transparent
+                        ($0000) instead of placed — typically the blank tile, so
+                        empty cells don't reference a real tile.
+
+    Cells whose destination slot falls outside [0, dest_entries) are dropped.
+    """
+    out = bytearray(dest_entries * 2)
+    for iy in range(src_rows):
+        for ix in range(src_cols):
+            e = entries[iy * src_cols + ix]
+            if skip_tiles is not None and e.tile in skip_tiles:
+                continue
+            pal = palette_remap.get(e.palette, e.palette) if palette_remap else e.palette
+            placed = TilemapEntry(
+                tile=e.tile + tile_base,
+                palette=pal,
+                priority=force_priority or e.priority,
+                h_flip=e.h_flip,
+                v_flip=e.v_flip,
+            )
+            slot = base_entry + iy * dest_cols + ix
+            if 0 <= slot < dest_entries:
+                w = placed.to_word()
+                out[slot * 2] = w & 0xFF
+                out[slot * 2 + 1] = (w >> 8) & 0xFF
+    return bytes(out)
+
+
 def encode_tilemap(entries: Sequence[Sequence[TilemapEntry]]) -> bytes:
     out = bytearray()
     for row in entries:

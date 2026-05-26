@@ -83,6 +83,11 @@ SECTION_ATTRS: dict[SectionKind, AttrSpec] = {
         optional=frozenset({
             "bpp", "count", "format", "palette-ref", "tiles-per-row",
             "encode", "compression",
+            # PNG (SuperFamiconv) encode mode + tilemap projection
+            "color-zero", "no-flip", "tile-count", "colors", "palettes",
+            "palette-from-png",
+            "map-offset", "tile-base", "map-cols", "map-entries",
+            "map-base-entry", "priority", "palette-anchors",
         }) | _SHARED_EXT,
     ),
     SectionKind.SCRIPT: AttrSpec(
