@@ -1,0 +1,52 @@
+[project]
+name = "retrotool-bass"
+version = "0.1.0"
+description = "Bundled bass v18 (ARM9 fork) multi-architecture assembler binary for retrotool"
+readme = "README.md"
+authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
+license = {text = "ISC"}
+requires-python = ">=3.12"
+keywords = ["bass", "65816", "snes", "sfc", "patcher", "assembler", "arm9"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: ISC License (ISCL)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Assemblers",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["retrotool_bass"]
+
+[tool.setuptools.package-data]
+# `bin/architectures/*` is shipped alongside the binary because bass v18
+# searches `Path::program() + "architectures/<name>.arch"` at runtime —
+# without those files, `arch snes.cpu` and friends fail to resolve.
+retrotool_bass = ["bin/*", "bin/architectures/*", "licenses/*"]
+
+[tool.cibuildwheel]
+skip = ["pp*", "*-musllinux_*", "cp36-*", "cp37-*", "cp38-*", "cp39-*", "cp310-*", "cp311-*"]
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+# bass uses GNU make + a recent g++ (the bundled `nall` template library
+# requires modern C++17/20).
+before-all = "yum install -y gcc-c++ make || { apt-get update && apt-get install -y g++ make; }"
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+# bass on Windows is built via MSYS2; the cibuildwheel image runs MSYS2
+# bash. The setup.py's _build_bass() detects the platform and picks the
+# right toolchain.
+archs = ["AMD64"]
