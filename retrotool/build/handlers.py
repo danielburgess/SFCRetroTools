@@ -2282,7 +2282,7 @@ def _emit_windowed_marker_writes(
             if _dbg:
                 print(f"    win ${start:04X}-${end:04X} size={window_size} preserve={preserve_lead} enc={encoded_text[:16].hex()}({len(encoded_text)}b) orig={orig_text[:16].hex()}({len(orig_text)}b)")
             if encoded_text == orig_text:
-                if _dbg: print(f"      → no-op skip")
+                if _dbg: print("      → no-op skip")
                 continue
 
             # Inline FFC0 stub at $start (default) or $start+1 (preserve mode).
@@ -2445,7 +2445,7 @@ def _emit_auto_window_writes(
 
         # Skip no-op writes when encoded matches the source bytes already.
         if enc == bytes(source_snapshot[slot_pc:slot_pc + len(enc)]):
-            if _dbg: print(f"    → no-op (enc matches source)")
+            if _dbg: print("    → no-op (enc matches source)")
             entry_pc[i] = slot_pc
             entry_text_pc[i] = slot_pc
         elif len(enc) <= slot_size and not force_overflow:
