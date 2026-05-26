@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from retrotool.project.schema import parse_size, parse_snes_addr
+from retrotool.project.schema import parse_snes_addr
 
 TABLE_TYPES = {"pointer", "fixed", "dte", "bytecode"}
 COMPRESSION_TYPES = {"none", "lzss", "rle", "custom"}

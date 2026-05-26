@@ -5,7 +5,6 @@ Pure data transform. External callers send `ProjectContext.to_prompt()` to their
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from retrotool.project.schema import ProjectConfig
 

@@ -95,7 +95,7 @@ def _run_script_step(args: argparse.Namespace) -> int:
     per step and exits non-interactively.
     """
     from retrotool.build import (
-        SectionKind, build_project, iter_step_builds, load_spec,
+        SectionKind, iter_step_builds, load_spec,
         parse_csv_set, parse_defines, parse_only_args,
         default_output_path, default_cache_dir, resolve_jobs,
     )

@@ -32,7 +32,6 @@ The decoder accepts any length encoding that produces the same chunk semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from retrotool.compression.base import Codec, CompressResult, DecompressResult
 

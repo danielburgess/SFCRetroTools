@@ -1,7 +1,7 @@
 """Godot TileSet resource builder. Atlas sources + physics/collision layers."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from retrotool.export.godot.resource import GdResource

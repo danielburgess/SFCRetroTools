@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 from retrotool.compression.base import Codec
-from retrotool.compression.lc_lz2 import LCLZ2Codec, LCLZ2Params
+from retrotool.compression.lc_lz2 import LCLZ2Codec
 from retrotool.compression.lzss import (
     LZSSCodec,
     LZSSParams,
