@@ -164,10 +164,12 @@ def datadef_from_dict(doc: dict, source_path: Optional[Path] = None) -> DataDef:
     if sec_doc is not None:
         if not isinstance(sec_doc, dict):
             raise ValueError(f"datadef {name}: [section] must be a table")
-        # `kind` defaults to "script" — the overwhelmingly common case.
-        # Fixed-width tables (unit-names etc) must declare kind="fixed-records"
-        # explicitly; other kinds (font, asar, ...) similarly.
-        kind = sec_doc.get("kind", "script")
+        # `kind` is required and explicit — script, fixed-records, font, asar,
+        # etc. (No implicit default: a silently-assumed kind="script" masks
+        # authoring mistakes and produces the wrong pipeline for data tables.)
+        kind = sec_doc.get("kind")
+        if kind is None:
+            raise ValueError(f"datadef {name}: [section].kind required")
         if not isinstance(kind, str) or not kind:
             raise ValueError(f"datadef {name}: [section].kind must be a string")
         # [section] must not redeclare ROM-structure facts owned by pointers/

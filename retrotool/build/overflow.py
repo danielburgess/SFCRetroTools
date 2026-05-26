@@ -243,12 +243,25 @@ class InlineRedirectStrategy(OverflowStrategy):
         splitter: Optional[Callable[[bytes, int], int]] = None,
         redirect_back: bool = False,
         defer_pointer: bool = False,
+        undersized: str = "error",
     ):
         self.marker = bytes(marker)
         self.pointer_size = pointer_size
         self.pointer_encoder = pointer_encoder or _default_pc_to_lorom1_le
         self.splitter = splitter
         self.redirect_back = redirect_back
+        # Behavior when a slot is too small to even hold the redirect stub
+        # (marker + pointer): `"error"` (default) raises so the mistake is
+        # loud; `"preserve"` keeps the original source bytes untouched (for
+        # entries the engine reaches only via external pins, where clobbering
+        # them would break cross-entry redirects — the lm3 case). Configurable
+        # per-section via the overflow TOML (`undersized = "preserve"`).
+        if undersized not in ("error", "preserve"):
+            raise ValueError(
+                f"inline-redirect: undersized must be 'error' or 'preserve', "
+                f"got {undersized!r}"
+            )
+        self.undersized = undersized
         # When True, the strategy writes a 3-byte `\xFF\xFF\xFF` placeholder at
         # the pointer slot and returns a `PackFixup` in `Packed.fixups`. The
         # caller (handle_script) resolves all fixups uniformly after every
@@ -268,11 +281,18 @@ class InlineRedirectStrategy(OverflowStrategy):
                 f"{entry.id}: inline-redirect needs an allocator for overflow tail"
             )
         if entry.max_inline < self.stub_size:
-            # Slot too small for an FFC0 redirect stub. Mirror lm3.py
-            # behavior: preserve the source ROM bytes for this entry (the
-            # game typically reaches such entries only via external pins,
-            # so overwriting them would break cross-entry redirects).
-            return Packed(inline=None, preserve_source=True)
+            # Slot too small to hold even the redirect stub (marker+pointer).
+            if self.undersized == "preserve":
+                # Keep the source ROM bytes for this entry untouched — the game
+                # typically reaches such entries only via external pins, so
+                # overwriting them would break cross-entry redirects (lm3 case).
+                return Packed(inline=None, preserve_source=True)
+            raise OverflowError(
+                f"{entry.id}: slot ({entry.max_inline}b) too small for the "
+                f"{self.stub_size}b redirect stub (marker {len(self.marker)}b + "
+                f"pointer {self.pointer_size}b). Set overflow `undersized = "
+                f'"preserve"` to keep the original bytes instead.'
+            )
 
         budget = entry.max_inline - self.stub_size
         if self.splitter is not None:
@@ -626,6 +646,10 @@ def strategy_from_config(cfg: dict, *, splitter_ctx: Optional[dict] = None) -> O
       - `redirect-back`    bool
       - `defer-pointer`    bool (default True — lets the handler resolve the
                            pointer after every entry is placed)
+      - `undersized`       'error' (default) | 'preserve' — behavior when a
+                           slot is too small to hold the redirect stub. 'error'
+                           raises loudly; 'preserve' keeps the original source
+                           bytes (entries reached only via external pins).
 
     Strategies not needing these just look them up in the registry.
     """
@@ -646,6 +670,7 @@ def strategy_from_config(cfg: dict, *, splitter_ctx: Optional[dict] = None) -> O
         splitter = build_splitter(str(split_name), cfg.get("splitter-arg"), ctx=splitter_ctx)
         redirect_back = bool(cfg.get("redirect-back", False))
         defer_pointer = bool(cfg.get("defer-pointer", True))
+        undersized = str(cfg.get("undersized", "error"))
         return InlineRedirectStrategy(
             marker=marker,
             pointer_size=pointer_size,
@@ -653,6 +678,7 @@ def strategy_from_config(cfg: dict, *, splitter_ctx: Optional[dict] = None) -> O
             splitter=splitter,
             redirect_back=redirect_back,
             defer_pointer=defer_pointer,
+            undersized=undersized,
         )
     return get(name)
 

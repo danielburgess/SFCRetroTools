@@ -84,6 +84,23 @@ def _resolve(file: Path, root: Path) -> Path:
     return (root / p).resolve()
 
 
+def _resolve_pointer_table_pc(pointer_table, addr_type: int):
+    """Resolve a spec ``pointer_table`` to a ``(pc_offset, SFCAddress)`` pair.
+
+    ``pointer_table`` is always a **PC file offset** (it comes from DataDef
+    ``pointers.offset`` and is the same value used as the PC write target via
+    ``section.offset``). It may be authored in hex (``"$13100"``) but is *not* a
+    SNES address — interpreting it as a SNES address of ``addr_type`` is wrong
+    (e.g. PC ``0x1BCA4`` read as ``$01:BCA4`` resolves to a different PC). The
+    returned :class:`SFCAddress` view is positioned at that PC offset so callers
+    can derive the table's bank byte in the ROM's mapping via ``addr_type``.
+    """
+    from retrotool.core.address import SFCAddress, SFCAddressType
+
+    ptr_addr = SFCAddress(pointer_table, SFCAddressType.PC)
+    return ptr_addr.get_address(SFCAddressType.PC), ptr_addr
+
+
 def _read_concat(section: Section, root: Path) -> bytes:
     chunks: list[bytes] = []
     for f in section.files:
@@ -934,11 +951,12 @@ def _script_prepare_relocate(
     )
 
     # Encoder's sub_table_filter expects a PC offset; section.pointer_table may
-    # be a raw SNES address from the spec (`offset = "$8586E4"`). Convert via
-    # section.address_type (populated from spec.mapping by the driver).
-    from retrotool.core.address import SFCAddress, SFCAddressType
+    # be a raw SNES address from the spec (`offset = "$8586E4"`) or a plain PC
+    # offset. Normalize via section.address_type (populated from spec.mapping by
+    # the driver), falling back to LoROM1.
+    from retrotool.core.address import SFCAddressType
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
-    sub_table_pc = SFCAddress(section.pointer_table, addr_type).get_address(SFCAddressType.PC)
+    sub_table_pc, _ = _resolve_pointer_table_pc(section.pointer_table, addr_type)
 
     entries = encode_script_file(
         script_path, table_path,
@@ -1073,10 +1091,10 @@ def handle_script(
     # either a SNES address (`offset = "$8586E4"`) or a PC offset depending
     # on how the spec is written. Use section.address_type (populated by
     # driver from spec mapping) for the conversion, falling back to LoROM1.
+    # SFCAddress is also used below for the sentinel-passthrough decode.
     from retrotool.core.address import SFCAddress, SFCAddressType
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
-    _ptr_addr = SFCAddress(section.pointer_table, addr_type)
-    ptr_tbl_pc = _ptr_addr.get_address(SFCAddressType.PC)
+    ptr_tbl_pc, _ptr_addr = _resolve_pointer_table_pc(section.pointer_table, addr_type)
     ptr_tbl_bank = _ptr_addr.get_bank_byte(addr_type)
     ptr_tbl_len = count * ptr_size
     data_start = ptr_tbl_pc + ptr_tbl_len
@@ -1175,7 +1193,11 @@ def handle_script(
                 snes = raw[0] | (raw[1] << 8) | (raw[2] << 16)
             else:
                 snes = (bank_hi << 16) | raw[0] | (raw[1] << 8)
-            pc = SFCAddress(snes, addr_type).get_address(SFCAddressType.PC)
+            # Decode under the project's mapping with NO LoROM1/LoROM2 fallback:
+            # a slot that does not map in addr_type is a genuine sentinel. (The
+            # fallback would rescue system-area mirror pointers as valid PCs and
+            # mis-pack the table — see af522aa regression.)
+            pc = SFCAddress(snes, addr_type, lorom_fallback=False).get_address(SFCAddressType.PC)
             if pc is None:
                 sentinel_raw[i] = raw
             else:
@@ -1269,12 +1291,17 @@ def handle_script(
             ptrs.append(pc)
             continue
 
-        # Append terminator byte if entry doesn't already end with it. Engines
-        # like rbshura's expect a standalone terminator between entries; the
-        # encoder drops it because the source `[F7][FF][FB][15]` text already
-        # represents the entry "end" semantically via the END opcode.
-        if enc and enc[-1] != term_byte:
-            enc = enc + bytes([term_byte])
+        # Append a separator terminator between entries — but ONLY when the
+        # project explicitly configures one (`section.terminator`). Re-packed
+        # entries need an explicit separator or the engine's byte-walker reads
+        # entry N into N+1 (rbshura: $FF, LM3: $00). When `terminator` is unset
+        # we must NOT guess a default: appending a byte corrupts byte-exact
+        # round-trip of source data that already carries its own structure —
+        # e.g. a 5-byte FF-C0 ctrl with no trailing terminator, where a guessed
+        # $FF would even re-open a control sequence. (See test_extract
+        # round-trip regressions; default-$FF append was a b7d3564 regression.)
+        if section.terminator is not None and enc and enc[-1] != section.terminator:
+            enc = enc + bytes([section.terminator])
 
         # 24-bit pointer fast path: with 3-byte L4 entries the runtime engine
         # follows the pointer to any ROM bank, so each entry can live wherever
@@ -1718,6 +1745,7 @@ def _pack_fixed_records(
     # First pass: encode all text blocks. Store by (idx, label) so we can
     # then resolve per-record layouts in field-declaration order.
     encoded_by_key: dict[tuple[int, str], bytes] = {}
+    skipped_labels: set[str] = set()
     for entry in text.split("<<")[1:]:
         if ">>" not in entry:
             continue
@@ -1735,12 +1763,33 @@ def _pack_fixed_records(
                 f"{source}: entry {idx} exceeds count={count}"
             )
         if label not in field_by_label:
-            raise HandlerError(
-                f"{source}: entry {idx} references unknown field label "
-                f"{label!r} (known: {sorted(field_by_label)!r})"
-            )
+            # Label belongs to a sibling section, not this one. A single
+            # multi-label source (e.g. records carrying both `.weapon` and
+            # `.armor`) can feed several fixed-records sections, each
+            # declaring only the field(s) it owns. Skip foreign labels here;
+            # if NONE match (truly wrong schema / typo'd field), the
+            # post-loop guard raises naming the offenders.
+            skipped_labels.add(label)
+            continue
         encoded, _fixups, _labels = _encode_text(content, tbl, fallback_table=fb_tbl)
         encoded_by_key[(idx, label)] = encoded
+
+    if not encoded_by_key:
+        # Nothing matched. If the source carried labelled headers, every one
+        # was foreign to this section's schema — almost always a typo'd field
+        # label rather than a legitimate multi-section share (that would leave
+        # at least one matching label). Name the offending labels.
+        if skipped_labels:
+            raise HandlerError(
+                f"{source}: unknown field label(s) {sorted(skipped_labels)!r} — "
+                f"not in this section's declared schema {sorted(field_by_label)!r}. "
+                f"Check the [[fields]] labels against the `<<$HEX:idx.label>>` headers."
+            )
+        raise HandlerError(
+            f"{source}: no source entries matched this section's field "
+            f"schema (declared: {sorted(field_by_label)!r}). Check the "
+            f"[[fields]] labels against the `<<$HEX:idx.label>>` headers."
+        )
 
     # Second pass: resolve each record's layout in field-declaration order
     # so auto-pack `start` chains correctly. For count>1, all fields must
@@ -2012,7 +2061,14 @@ def _script_prepare_overflow(
     # and read out the PC form for indexing.
     count = int(section.count)
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
-    ptr_addr = SFCAddress(section.pointer_table, addr_type)
+    # section.pointer_table is a PC offset: it comes from DataDef pointers.offset
+    # (parse_snes_addr returns the authored number as-is, no SNES→PC conversion)
+    # and is the SAME value used as the PC write target via section.offset.
+    # Construct as PC, then derive the table's bank byte in the ROM's mapping
+    # for assembling the per-entry pointers below. (Interpreting it as a SNES
+    # addr of addr_type was wrong — e.g. PC 0x13100 read as LoROM $01:3100 is
+    # unmapped, and PC 0x1BCA4 read as $01:BCA4 resolves to the WRONG PC.)
+    ptr_addr = SFCAddress(section.pointer_table, SFCAddressType.PC)
     ptr_bank = ptr_addr.get_bank_byte(addr_type)
     ptr_tbl_pc = ptr_addr.get_address(SFCAddressType.PC)
     orig_pcs: list[int] = []
