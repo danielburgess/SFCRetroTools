@@ -28,6 +28,10 @@ packages/retrotool-libsfx/retrotool_libsfx/include/
 packages/retrotool-libsfx/retrotool_libsfx/examples/
 packages/retrotool-xdelta/retrotool_xdelta/bin/
 packages/retrotool-asar/retrotool_asar/bin/
+# bass: binary + architectures/ + licenses/ are all built/copied from vendor/
+# by setup.py at wheel-build time (see retrotool-bass/setup.py).
+packages/retrotool-bass/retrotool_bass/bin/
+packages/retrotool-bass/retrotool_bass/licenses/
 
 # MemPalace/other local tooling artifacts
 *.original.md
