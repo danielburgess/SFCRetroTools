@@ -1,7 +1,7 @@
 """Python dataclasses → C++ header/source."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field
 
 _PY_TO_CPP = {
     int: "int32_t",

@@ -1,7 +1,6 @@
 """SFCPointer — 24-bit SNES pointer (low/high/bank) with flexible setters."""
 from __future__ import annotations
 
-from typing import Union
 
 from retrotool.core.binary import (
     bank_byte,

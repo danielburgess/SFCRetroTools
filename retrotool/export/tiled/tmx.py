@@ -1,11 +1,10 @@
 """Tiled TMX (tilemap) XML emitter."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
-from retrotool.extraction.level import Level, TileLayer, Trigger, SpawnPoint
+from retrotool.extraction.level import Level
 
 
 def _pretty(elem: ET.Element) -> str:

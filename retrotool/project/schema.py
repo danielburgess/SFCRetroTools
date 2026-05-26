@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Optional
 
 from retrotool.core.address import SFCAddressType
-from retrotool.core.binary import integer_or_hex
 
 _MAPPING_TO_ADDR_TYPE = {
     "lorom": SFCAddressType.LOROM1,

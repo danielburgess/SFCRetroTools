@@ -28,7 +28,7 @@ from time import perf_counter
 from typing import Callable, Optional
 
 from retrotool.core.cache import BuildCache, sha256_file, sha256_many
-from retrotool.core.rom import SMC_HEADER_SIZE, _strip_smc_header, detect_header
+from retrotool.core.rom import _strip_smc_header, detect_header
 from retrotool.build.diff import DiffResult, write_diff
 from retrotool.build.handlers import BuildContext, HandlerError, WriteRange, get_handler
 from retrotool.build.overflow import FreespaceAllocator

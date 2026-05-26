@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from retrotool.core.address import SFCAddress, SFCAddressType
 from retrotool.core.binary import read_u16_le, read_u24_le

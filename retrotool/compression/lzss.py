@@ -8,7 +8,7 @@ ring-buffer fill byte, and chaining.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 from retrotool.compression.base import Codec, CompressResult, DecompressResult
 
