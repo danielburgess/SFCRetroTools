@@ -31,6 +31,12 @@ packages/retrotool-asar/retrotool_asar/bin/
 # bass: binary + architectures/ + licenses/ are all built/copied from vendor/
 # by setup.py at wheel-build time (see retrotool-bass/setup.py).
 packages/retrotool-bass/retrotool_bass/bin/
+# Per-wheel licenses/ dirs are copied from vendor/ by each setup.py's
+# _copy_licenses() at build time (attribution shipped in the wheel) — generated,
+# not source.
+packages/retrotool-asar/retrotool_asar/licenses/
+packages/retrotool-libsfx/retrotool_libsfx/licenses/
+packages/retrotool-xdelta/retrotool_xdelta/licenses/
 packages/retrotool-bass/retrotool_bass/licenses/
 
 # MemPalace/other local tooling artifacts
