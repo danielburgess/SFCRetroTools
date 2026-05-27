@@ -1,0 +1,121 @@
+name: build-bass-wheels
+
+on:
+  push:
+    tags:
+      - "bass-v*"
+    branches:
+      - main
+    paths:
+      - "packages/retrotool-bass/**"
+      - ".github/workflows/wheels-bass.yml"
+  pull_request:
+    paths:
+      - "packages/retrotool-bass/**"
+      - ".github/workflows/wheels-bass.yml"
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: wheel ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-latest
+            arch: aarch64
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+          - os: windows-latest
+            arch: AMD64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU (linux aarch64)
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up MSYS2 (windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-cmake
+
+      - name: Add MSYS2 to PATH (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\msys64\usr\bin"    | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+        with:
+          package-dir: packages/retrotool-bass
+          output-dir: wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-bass-${{ matrix.os }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        # The sdist must be producible without a C++ toolchain; skip the
+        # native bass build (it only packages source — the wheel build does
+        # the compile). See retrotool-bass/setup.py.
+        env:
+          RETROTOOL_SKIP_NATIVE_BUILD: "1"
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist packages/retrotool-bass --outdir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist-bass
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/bass-v')
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
