@@ -1,6 +1,6 @@
 [project]
 name = "retrotool-bass"
-version = "0.9.2"
+version = "18.0"
 description = "Bundled bass v18 (ARM9 fork) multi-architecture assembler binary for retrotool"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]
