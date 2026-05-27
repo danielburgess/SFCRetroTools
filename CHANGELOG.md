@@ -1,12 +1,11 @@
 # Changelog
 
-## 1.0.0 — 2026-05-26
+## 9.2.0 — 2026-05-26
 
-First stable release: the full ROM-hacking toolkit (library + CLI) — address
-math, compression, script/table, build-time graphics encode, MBXML and libSFX
-project builds, asar/bass/ca65/xdelta integration, content-addressed build
-cache, and Mesen2 IPC. Includes the changes below plus the cumulative 0.9.x
-work.
+The full ROM-hacking toolkit (library + CLI) — address math, compression,
+script/table, build-time graphics encode, MBXML and libSFX project builds,
+asar/bass/ca65/xdelta integration, content-addressed build cache, and Mesen2
+IPC. Includes the changes below plus the cumulative 0.9.x work.
 
 ### Default output directory (`[rom.build].output_dir`)
 
