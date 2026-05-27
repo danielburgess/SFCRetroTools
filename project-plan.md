@@ -7,7 +7,7 @@ sketches — plus the unshipped work items that don't belong on the
 public roadmap yet.
 
 **Package**: `retrotool` (PyPI) | **Repo**: `github.com/danielburgess/SFCRetroTools`
-**Current**: 9.2.0 — full toolchain + MBXML + libSFX integration shipped.
+**Current**: 0.9.2 — full toolchain + MBXML + libSFX integration shipped.
 **Active design docs**: [`plans/`](plans/) — one file per in-flight release plan.
 
 For the user-facing vision (project workbench, patch manager, community
