@@ -1,6 +1,6 @@
 [project]
 name = "retrotool-asar"
-version = "0.1.0"
+version = "1.91"
 description = "Bundled asar (RPGHacker) 65816 patcher binary for retrotool"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]

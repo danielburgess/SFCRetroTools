@@ -1,6 +1,6 @@
 [project]
 name = "retrotool-libsfx"
-version = "0.1.0"
+version = "2026.5.15"
 description = "Bundled Optiroc SNES toolchain (libSFX, SuperFamiconv, ca65, SuperFamicheck, brrtools, lz4) for retrotool"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]

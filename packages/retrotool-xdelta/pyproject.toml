@@ -1,6 +1,6 @@
 [project]
 name = "retrotool-xdelta"
-version = "0.1.0"
+version = "3.1.1"
 description = "Bundled xdelta3 binary for retrotool mbuild diff generation"
 readme = "README.md"
 authors = [{name = "Daniel Burgess", email = "daniel@herotechsys.com"}]

@@ -16,7 +16,7 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-__version__ = "0.9.2"
+__version__ = "18.0"
 
 _EXE = ".exe" if sys.platform == "win32" else ""
 
