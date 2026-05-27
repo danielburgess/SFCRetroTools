@@ -1,6 +1,6 @@
 # Changelog
 
-## 9.2.0 — 2026-05-26
+## 0.9.2 — 2026-05-26
 
 The full ROM-hacking toolkit (library + CLI) — address math, compression,
 script/table, build-time graphics encode, MBXML and libSFX project builds,

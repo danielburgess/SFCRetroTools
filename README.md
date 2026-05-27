@@ -1,6 +1,6 @@
 # retrotool
 
-**SNES/SFC ROM hacking *and* development toolkit** — v9.2
+**SNES/SFC ROM hacking *and* development toolkit** — v0.9.2
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
@@ -21,7 +21,7 @@ Built with automation in mind for **both directions** of SNES/SFC work:
 Static analysis, live debugger IPC, patch builds, asset export, and from-scratch assembly all
 wire into a single scriptable pipeline instead of a pile of one-off tools.
 
-v9.2 is the current release of the post-rewrite scope — the full toolkit (library + CLI,
+v0.9.2 is the current release of the post-rewrite scope — the full toolkit (library + CLI,
 example projects, and a pytest suite). The 0.1 line (address-only) still works through
 compatibility shims.
 
@@ -444,7 +444,7 @@ With the `[libsfx]` extra (0.9.0+):
 - `SFCNotFoundError` — raised when neither the bundled wheel nor a `superfamiconv`
   on `PATH` is available.
 
-Not yet in v9.2: `font.py` (1BPP-IL VWF + 2BPP 16x16 glyph pipelines), `animation.py`.
+Not yet in v0.9.2: `font.py` (1BPP-IL VWF + 2BPP 16x16 glyph pipelines), `animation.py`.
 
 ### `retrotool.compression`
 Unified codec framework. Parameterized LZSS covers all three variants shipped to date.
@@ -458,7 +458,7 @@ Unified codec framework. Parameterized LZSS covers all three variants shipped to
   `lzss-legacy`, `rle`.
 - `scan_lzss(data, presets, ...)` — brute-force candidate scanner with size/ratio filters.
 
-Not yet in v9.2: Huffman, Nintendo LZ77.
+Not yet in v0.9.2: Huffman, Nintendo LZ77.
 
 ### `retrotool.script`
 Text extraction + insertion using `.tbl` files.
@@ -488,7 +488,7 @@ sockets at `/tmp/CoreFxPipe_{pipeName}` (Windows support currently stub).
 - `run_until_breakpoint(client, addr, ...)` — install one-shot breakpoint, resume, poll.
 - `MemoryRegion` + `watch(...)` — tick/diff loop over a ROM or RAM range.
 
-Untested against a live Mesen process in v9.2 — wire format is implemented per the
+Untested against a live Mesen process in v0.9.2 — wire format is implemented per the
 documented protocol.
 
 ### `retrotool.heuristics`
@@ -1044,10 +1044,10 @@ Short version:
 
 - **0.8.x** — 12 library modules scaffolded; LZSS overlap bugfix + optional SuperFamiconv graphics pipeline.
 - **0.9** — CLI (`retrotool …` subcommands) + example projects (lm3, rbshura, zamn, minimal) + pytest suite.
-- **9.2** — (current) the full library + CLI toolkit — address math, compression, script/table,
+- **0.9.2** — (current) the full library + CLI toolkit — address math, compression, script/table,
   build-time graphics encode, MBXML + libSFX project builds, asar/bass/ca65/xdelta integration,
   content-addressed build cache, and Mesen2 IPC.
-- **Beyond 9.2** — GUI shell with customizable project explorer, game-adaptable script editor, graphics
+- **1.0 and beyond** — GUI shell with customizable project explorer, game-adaptable script editor, graphics
   extractor, graphics editor, statistics polling the debugger, pointer-table inspector, asar build panel;
   and runtime-guided heuristics that combine static scans with live Mesen state (write-breakpoint pointer
   discovery, DMA-trace data localization, glyph-correlation text discovery, LZSS fingerprinting via

@@ -12,7 +12,7 @@ from retrotool.graphics import Palette, Tile
 from retrotool.project import DataDef, ProjectConfig, load_datadef, load_project
 from retrotool.script import Table, extract_script
 
-__version__ = "9.2.0"
+__version__ = "0.9.2"
 
 __all__ = [
     "SFCAddress",
