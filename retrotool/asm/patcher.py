@@ -80,6 +80,21 @@ def apply_patch(
     asar resolution order: explicit `asar_cmd` override (if not the default) →
     bundled `retrotool-asar` wheel → system `asar` on PATH.
     """
+    # Validate inputs first — fail loud on ambiguous defines regardless of
+    # whether asar is bundled or the result is cached. Asar's CLI tokenizer
+    # splits on whitespace inside the define value, so `PATCH_TITLE=My Game`
+    # becomes two tokens; `"`/`=` are also unrepresentable. Match bass's
+    # validate-before-resolve ordering (test_apply_patch_rejects_whitespace_in_define
+    # asserts ValueError here regardless of asar binary availability).
+    for k, v in patch.defines.items():
+        sv = str(v)
+        if any(ch in sv for ch in ' \t\n"='):
+            raise ValueError(
+                f"asar define value for {k!r} contains whitespace, '\"', or '=' "
+                f"({sv!r}) — asar's CLI tokenizer cannot represent it. "
+                f"Use a `!define` line in an .asm include instead."
+            )
+
     key = _key(rom, patch) if cache else None
     if cache and key and cache.has(key):
         entry = cache.get(key)
@@ -101,17 +116,7 @@ def apply_patch(
 
     defines = []
     for k, v in patch.defines.items():
-        # Asar's CLI tokenizer splits on whitespace inside the define value, so
-        # `PATCH_TITLE=My Game` becomes two tokens. Reject the ambiguous chars
-        # rather than silently corrupting the patch.
-        sv = str(v)
-        if any(ch in sv for ch in ' \t\n"='):
-            raise ValueError(
-                f"asar define value for {k!r} contains whitespace, '\"', or '=' "
-                f"({sv!r}) — asar's CLI tokenizer cannot represent it. "
-                f"Use a `!define` line in an .asm include instead."
-            )
-        defines += ["-D", f"{k}={sv}"]
+        defines += ["-D", f"{k}={str(v)}"]
     cmd = [binary, *defines, str(patch.asm_file), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = (proc.stdout or "") + (proc.stderr or "")
