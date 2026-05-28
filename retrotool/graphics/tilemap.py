@@ -120,16 +120,32 @@ def encode_tilemap(entries: Sequence[Sequence[TilemapEntry]]) -> bytes:
 
 def render_tilemap(entries: Sequence[Sequence[TilemapEntry]], tiles: Sequence[Tile],
                    palettes: Sequence, transparent_if_priority: bool = False) -> tuple[int, int, bytes]:
-    """Render a tilemap grid into an RGBA buffer. palettes is list of Palette objects."""
+    """Render a tilemap grid into an RGBA buffer. palettes is list of Palette objects.
+
+    Returns ``(width, height, rgba_bytes)`` where ``rgba_bytes`` is row-major
+    8-bit RGBA. Per-pixel alpha comes from each palette's ``transparent_index``
+    (typically color 0 = transparent).
+
+    When ``transparent_if_priority`` is True, entries whose tilemap priority bit
+    is set are skipped entirely — their tile area is left fully transparent
+    (RGBA 0,0,0,0). This isolates the non-priority (background) SNES BG layer
+    for export/preview; the priority (foreground) layer can be rendered
+    separately by inverting the priority bits or using a complementary helper.
+    When False (default), every entry renders regardless of the priority bit.
+    """
     if not entries:
         return 0, 0, b''
     h = len(entries)
     w = len(entries[0])
     out_w = w * TILE_W
     out_h = h * TILE_H
-    buf = bytearray(out_w * out_h * 4)
+    buf = bytearray(out_w * out_h * 4)  # zero-init -> fully transparent
     for ty, row in enumerate(entries):
         for tx, e in enumerate(row):
+            if transparent_if_priority and e.priority:
+                # Skip — leaves this tile's 8x8 pixel region at the buffer's
+                # zero-init RGBA(0,0,0,0), i.e. fully transparent.
+                continue
             tile = tiles[e.tile]
             if e.h_flip or e.v_flip:
                 tile = tile.flipped(h=e.h_flip, v=e.v_flip)
