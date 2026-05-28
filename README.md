@@ -421,6 +421,11 @@ All pixel-level SNES formats.
   place a small tilemap into a larger sparse/windowed destination stream (for
   engines that DMA a fixed window of a BG tilemap). Offsets tile indices by
   `tile_base`, remaps palettes, leaves `skip_tiles` (e.g. the blank tile) as `$0000`.
+- `render_tilemap(entries, tiles, palettes, transparent_if_priority=False)` →
+  `(width, height, rgba_bytes)` — render a tilemap grid into a row-major 8-bit
+  RGBA buffer. Per-pixel alpha comes from each palette's `transparent_index`.
+  Set `transparent_if_priority=True` to leave priority-bit cells fully
+  transparent — useful for extracting the non-priority BG layer in isolation.
 - `SpriteFrame` / `render_frame` — compose frames from positioned 8×8 tiles; `pack_atlas`
   returns an `Atlas` with per-frame `AtlasEntry` origin metadata.
 

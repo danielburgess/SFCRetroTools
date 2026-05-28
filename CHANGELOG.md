@@ -1,11 +1,38 @@
 # Changelog
 
-## 0.9.2 — 2026-05-26
+## 0.9.2 — 2026-05-27
 
 The full ROM-hacking toolkit (library + CLI) — address math, compression,
 script/table, build-time graphics encode, MBXML and libSFX project builds,
 asar/bass/ca65/xdelta integration, content-addressed build cache, and Mesen2
 IPC. Includes the changes below plus the cumulative 0.9.x work.
+
+### Tilemap priority-bit isolation (`render_tilemap(..., transparent_if_priority=True)`)
+
+`render_tilemap` now honors the previously-stub `transparent_if_priority` flag.
+When True, entries whose SNES tilemap priority bit is set are skipped, leaving
+their 8×8 region fully transparent (RGBA 0,0,0,0) in the output buffer. Use it
+to extract the non-priority BG layer for export or preview without disturbing
+the per-pixel palette alpha on rendered (non-priority) cells. Default is
+False — every entry renders regardless of the priority bit, as before.
+
+### Overflow strategy: configurable `undersized` behavior
+
+`InlineRedirectStrategy` now exposes an `undersized` option for the case where
+a slot is smaller than the redirect stub (`marker + pointer`):
+
+```toml
+[scripts.main.overflow]
+strategy = "inline-redirect"
+undersized = "preserve"      # or "error" (default — fail loud)
+```
+
+`"error"` (default) raises a clear `OverflowError` so the budget mistake isn't
+silent. `"preserve"` keeps the original source ROM bytes for that entry
+untouched (the lm3 case: entries reached only via external pins, where
+overwriting them would break cross-entry redirects). The `marker` is already
+configurable per project — error messages no longer hard-code the FFC0 byte
+sequence.
 
 ### Default output directory (`[rom.build].output_dir`)
 
