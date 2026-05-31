@@ -292,15 +292,90 @@ def _handle_graphics_png(rom: bytearray, section: Section, root: Path) -> WriteR
     return written if len(written) > 1 else written[0]
 
 
-def handle_graphics(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
-    """Tile/palette/tilemap data.
+def _load_callable(ref: str, root: Path, source: str = "") -> Callable:
+    """Resolve a `path/to/mod.py:func` or `pkg.mod:func` reference to a callable.
+    File-path refs are resolved relative to the project root and imported by
+    location; dotted refs go through normal `import`."""
+    import importlib
+    import importlib.util
+    if ":" not in ref:
+        raise HandlerError(f"{source}: expected 'module:function', got {ref!r}")
+    mod_ref, func = ref.rsplit(":", 1)
+    if mod_ref.endswith(".py") or "/" in mod_ref or "\\" in mod_ref:
+        path = _resolve(Path(mod_ref), root)
+        if not path.exists():
+            raise HandlerError(f"{source}: module file not found: {path}")
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)
+    else:
+        mod = importlib.import_module(mod_ref)
+    fn = getattr(mod, func, None)
+    if not callable(fn):
+        raise HandlerError(f"{source}: {mod_ref} has no callable {func!r}")
+    return fn
 
-    Two input modes:
+
+def _run_callable(fn: Callable, rom: bytearray, section: Section, root: Path,
+                  ctx: Optional[BuildContext]):
+    """Call a project build callable and normalize its result to WriteRange(s).
+    The callable mutates `rom` directly and returns WriteRange | list | None."""
+    result = fn(rom, section, root, ctx)
+    if result is None:
+        return WriteRange(offset=section.offset or 0, length=0)
+    if isinstance(result, WriteRange):
+        return result
+    if isinstance(result, (list, tuple)):
+        out = list(result)
+        if all(isinstance(r, WriteRange) for r in out):
+            return out
+    raise HandlerError(
+        f"{section.source}: build callable must return WriteRange | "
+        f"list[WriteRange] | None, got {type(result).__name__}")
+
+
+def handle_python(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
+    """General build step: import a project module and run its build callable.
+
+    `file=<mod.py>` (or `module=<pkg.mod>`) + `func=` (default `build`). The
+    callable does anything — read inputs, compute bytes, write into `rom` — and
+    returns WriteRange | list[WriteRange] | None.
+        def build(rom, section, root, ctx):
+            data = ...                    # produce bytes any way you like
+            off = section.offset
+            rom[off:off+len(data)] = data
+            return WriteRange(off, len(data))
+    """
+    module = section.attrs.get("module")
+    func = section.attrs.get("func", "build")
+    if module:
+        ref = f"{module}:{func}"
+    elif section.files:
+        ref = f"{section.files[0]}:{func}"
+    else:
+        raise HandlerError(f"{section.source}: <python> requires file= or module=")
+    return _run_callable(_load_callable(ref, root, section.source or ""),
+                         rom, section, root, ctx)
+
+
+def handle_graphics(rom: bytearray, section: Section, root: Path, ctx: Optional[BuildContext] = None) -> WriteRange:
+    """Tile/palette/tilemap data — extensible to ANY graphics encoding.
+
+    Modes (first match wins):
+      * `encoder=` set — delegate to a project callable `path/mod.py:func` (or
+        `pkg.mod:func`). The callable does ANY encoding (custom quantizers,
+        metasprite tables, tilemap splices, or `retrotool.graphics.sfc_run(args)`
+        for a fully-custom SuperFamiconv invocation) and writes its own bytes.
+        Signature: `fn(rom, section, root, ctx) -> WriteRange | list[WriteRange]`.
       * `.png` file (or `format=`/`map-offset=` set) — SuperFamiconv encode →
         tiles + optional projected tilemap (see `_handle_graphics_png`).
-      * raw planar binary — written through (identity bitplane only; named
-        transforms like MBuild's "2bpp-to-1bpp-il" land later).
+      * raw planar binary — written through (identity bitplane only).
     """
+    encoder = section.attrs.get("encoder")
+    if encoder:
+        return _run_callable(_load_callable(encoder, root, section.source or ""),
+                             rom, section, root, ctx)
     if section.offset is None:
         raise HandlerError(f"{section.source}: <graphics> requires offset")
     is_png = bool(section.files) and str(section.files[0]).lower().endswith(".png")
@@ -2590,6 +2665,7 @@ HANDLERS: dict[SectionKind, HandlerFn] = {
     SectionKind.PROJECT: handle_project,
     SectionKind.FIXED_RECORDS: handle_fixed_records,
     SectionKind.LIBSFX: handle_libsfx,
+    SectionKind.PYTHON: handle_python,
     # Back-compat alias: `kind="windowed-script"` routes to the unified
     # script handler. `placement.mode = "overflow"` on `kind="script"` is
     # the preferred form; windowed-script is deprecated and kept so existing

@@ -116,6 +116,12 @@ SECTION_ATTRS: dict[SectionKind, AttrSpec] = {
             "overflow",
         }) | _SHARED_EXT,
     ),
+    # General build step: import a project module and run it. The callable
+    # defines its own attr contract, so all attrs are permitted (see below).
+    SectionKind.PYTHON: AttrSpec(
+        required=frozenset(),
+        optional=frozenset({"file", "module", "func", "offset"}) | _SHARED_EXT,
+    ),
 }
 
 
@@ -130,6 +136,13 @@ def validate_build_attrs(attrs: dict, *, strict: bool = False, source: str = "")
 
 
 def validate_section_attrs(kind: SectionKind, attrs: dict, *, strict: bool = False, source: str = "") -> None:
+    # Custom-callable sections (`kind="python"`, or `kind="graphics"` with an
+    # `encoder=`) define their own attr contract — accept any attrs, just check
+    # the entry point is present.
+    if kind is SectionKind.PYTHON or (kind is SectionKind.GRAPHICS and attrs.get("encoder")):
+        if kind is SectionKind.PYTHON and not (attrs.get("file") or attrs.get("module")):
+            raise SchemaError(f"{source}: <python> requires file= or module=")
+        return
     spec = SECTION_ATTRS.get(kind)
     if spec is None:
         raise SchemaError(f"{source}: unhandled element <{kind.value}>")

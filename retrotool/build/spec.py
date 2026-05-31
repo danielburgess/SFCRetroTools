@@ -40,13 +40,16 @@ class SectionKind(str, Enum):
     LIBSFX = "libsfx"
     FIXED_RECORDS = "fixed-records"
     WINDOWED_SCRIPT = "windowed-script"
+    # general-purpose build step: import a project module and call it. The
+    # callable produces and writes its own bytes (e.g. custom graphics encoders).
+    PYTHON = "python"
 
     @property
     def operation(self) -> str:
         last = self.value[-1]
         if self.value in ("bin", "asar", "bass", "ca65", "graphics", "script",
                           "project", "libsfx", "fixed-records",
-                          "windowed-script"):
+                          "windowed-script", "python"):
             return OP_REPLACE  # default; actual behavior handler-specific
         return OP_INSERT if last == "i" else OP_REPLACE
 
