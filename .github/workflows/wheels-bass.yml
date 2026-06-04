@@ -36,8 +36,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Check out only this package's vendored submodule
+        run: git submodule update --init --depth 1 packages/retrotool-bass/vendor/bass
 
       - name: Set up QEMU (linux aarch64)
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
@@ -80,8 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Check out only this package's vendored submodule
+        run: git submodule update --init --depth 1 packages/retrotool-bass/vendor/bass
 
       - uses: actions/setup-python@v5
         with:
