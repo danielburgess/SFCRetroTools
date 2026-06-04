@@ -1,12 +1,12 @@
 [submodule "packages/retrotool-libsfx/vendor/libSFX"]
 	path = packages/retrotool-libsfx/vendor/libSFX
-	url = https://github.com/Optiroc/libSFX
+	url = https://github.com/danielburgess/libSFX
 [submodule "packages/retrotool-xdelta/vendor/xdelta"]
 	path = packages/retrotool-xdelta/vendor/xdelta
-	url = https://github.com/jmacd/xdelta
+	url = https://github.com/danielburgess/xdelta
 [submodule "packages/retrotool-asar/vendor/asar"]
 	path = packages/retrotool-asar/vendor/asar
 	url = https://github.com/RPGHacker/asar
 [submodule "packages/retrotool-bass/vendor/bass"]
 	path = packages/retrotool-bass/vendor/bass
-	url = https://github.com/ARM9/bass
+	url = https://github.com/danielburgess/bass
