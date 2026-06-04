@@ -36,8 +36,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Check out libSFX and its tool submodules
+        run: git submodule update --init --recursive --depth 1 packages/retrotool-libsfx/vendor/libSFX
 
       - name: Set up QEMU (linux aarch64)
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
@@ -79,8 +80,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Check out libSFX and its tool submodules
+        run: git submodule update --init --recursive --depth 1 packages/retrotool-libsfx/vendor/libSFX
 
       - uses: actions/setup-python@v5
         with:
