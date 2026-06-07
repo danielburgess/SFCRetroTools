@@ -51,6 +51,10 @@ def _find_binary(root: Path, name: str, extra: list[Path] = ()) -> Path | None:
     candidates = [
         *(e / exe for e in extra),
         root / "bin" / exe,
+        # CMake multi-config generators (e.g. Visual Studio) nest the binary
+        # under a per-config subdir; single-config ones put it directly here.
+        root / "build" / "release" / "Release" / exe,
+        root / "build" / "release" / "Debug" / exe,
         root / "build" / "release" / exe,
         root / "build" / exe,
         root / "src" / exe,
@@ -85,7 +89,21 @@ def _build_and_collect(tool_dir: Path, binaries: list[str], build_cwd_sub: str =
         _patch_brrtools(tool_dir)
 
     build_cwd = tool_dir / build_cwd_sub if build_cwd_sub else tool_dir
-    subprocess.check_call([MAKE_CMD, "-j", *make_targets], cwd=build_cwd)
+    if tool_dir.name == "superfamiconv" and sys.platform == "win32":
+        # The system cmake on Windows selects the Visual Studio multi-config
+        # generator, which ignores CMAKE_BUILD_TYPE and — without --config —
+        # builds Debug. Drive cmake directly to get a Release build; the
+        # binary lands in build/release/Release/ (handled by _find_binary).
+        subprocess.check_call(
+            ["cmake", "-B", "build/release", "-DCMAKE_BUILD_TYPE=Release"],
+            cwd=tool_dir,
+        )
+        subprocess.check_call(
+            ["cmake", "--build", "build/release", "--config", "Release", "--parallel", "4"],
+            cwd=tool_dir,
+        )
+    else:
+        subprocess.check_call([MAKE_CMD, "-j", *make_targets], cwd=build_cwd)
 
     collected = []
     extra_search = [build_cwd] if build_cwd_sub else []
