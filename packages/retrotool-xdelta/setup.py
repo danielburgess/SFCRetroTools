@@ -66,6 +66,17 @@ def _build_xdelta3() -> None:
 
     env = os.environ.copy()
     if sys.platform == "win32":
+        # The vcxproj's Release|x64 config omits the SIZEOF_* macros that
+        # xdelta3.h needs (autotools' configure supplies them on Unix).
+        # Inject the correct Win64 (LLP64) sizes via the CL env var, which
+        # cl.exe honors, rather than overriding the project's other defines.
+        env["CL"] = " ".join(filter(None, [
+            env.get("CL", ""),
+            "/DSIZEOF_SIZE_T=8",
+            "/DSIZEOF_UNSIGNED_LONG_LONG=8",
+            "/DSIZEOF_UNSIGNED_LONG=4",
+            "/DSIZEOF_UNSIGNED_INT=4",
+        ]))
         # The vendored xdelta3.vcxproj pins the VS2013 toolset (v120), which
         # isn't installed on modern runners. Retarget to the current toolset
         # and let msbuild pick the latest installed Windows 10 SDK.
