@@ -57,6 +57,27 @@ def _patch_xdelta3(src: Path) -> None:
             print("[retrotool-xdelta] patched xdelta3.h: added <assert.h>")
 
 
+def _disable_vcxproj_lzma(src: Path) -> None:
+    """The vendored xdelta3.vcxproj enables the external-LZMA secondary
+    compressor (SECONDARY_LZMA=1) and links a prebuilt liblzma_static.lib that
+    isn't vendored — so it fails to find lzma.h at compile and the lib at link.
+    A project /D overrides the CL env var, so disabling it must happen in the
+    project file itself. Turn LZMA off and strip the liblzma dependency; the
+    built-in DJW/FGK secondary compressors remain."""
+    import re
+    proj = src / "xdelta3.vcxproj"
+    if not proj.exists():
+        return
+    txt = proj.read_text()
+    new = txt.replace("SECONDARY_LZMA=1", "SECONDARY_LZMA=0")
+    # Drop any AdditionalDependencies entry pointing at liblzma_static.lib
+    # (with its leading ';' separator) so the link doesn't need the missing lib.
+    new = re.sub(r";?[^;<>]*liblzma_static\.lib", "", new)
+    if new != txt:
+        proj.write_text(new)
+        print("[retrotool-xdelta] patched vcxproj: SECONDARY_LZMA off, dropped liblzma dep")
+
+
 def _build_xdelta3() -> None:
     if not XDELTA_SRC.exists():
         print(f"[retrotool-xdelta] skipping — {XDELTA_SRC} not vendored yet")
@@ -66,19 +87,19 @@ def _build_xdelta3() -> None:
 
     env = os.environ.copy()
     if sys.platform == "win32":
+        _disable_vcxproj_lzma(XDELTA_SRC)
         # The vcxproj's Release|x64 config omits the SIZEOF_* macros that
         # xdelta3.h needs (autotools' configure supplies them on Unix).
         # Inject the correct Win64 (LLP64) sizes via the CL env var, which
-        # cl.exe honors, rather than overriding the project's other defines.
+        # cl.exe honors. (Macros the project itself defines, like
+        # SECONDARY_LZMA, can't be overridden this way — those are patched in
+        # the vcxproj above, since a project /D wins over the CL env var.)
         env["CL"] = " ".join(filter(None, [
             env.get("CL", ""),
             "/DSIZEOF_SIZE_T=8",
             "/DSIZEOF_UNSIGNED_LONG_LONG=8",
             "/DSIZEOF_UNSIGNED_LONG=4",
             "/DSIZEOF_UNSIGNED_INT=4",
-            # Disable the external-LZMA secondary compressor (needs lzma.h,
-            # not vendored). DJW + FGK secondary compressors stay enabled.
-            "/DSECONDARY_LZMA=0",
         ]))
         # The vendored xdelta3.vcxproj pins the VS2013 toolset (v120), which
         # isn't installed on modern runners. Retarget to the current toolset
