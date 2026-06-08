@@ -43,6 +43,31 @@ pip install retrotool[xdelta]    # xdelta3 binary delta tool
 pip install retrotool[all]       # every bundled wheel at once
 ```
 
+### Platform support
+
+The core `retrotool` package is pure Python (`py3-none-any`) and runs anywhere
+Python 3.12+ does. The **bundled-binary extras** ship prebuilt wheels for:
+
+| Platform | Prebuilt wheel (`asar` / `bass` / `libsfx` / `xdelta`) |
+|---|---|
+| Linux x86_64 (manylinux2014) | ✅ |
+| Linux aarch64 (manylinux2014) | ✅ |
+| Windows x64 (AMD64) | ✅ |
+| macOS (Intel / Apple Silicon) | ⚠️ no prebuilt wheel — see below |
+
+Binary wheels are built for **CPython 3.12 and 3.13**. `pip` picks the right
+wheel automatically; nothing to compile on the supported platforms.
+
+**macOS:** there are no prebuilt binary wheels (GitHub's Intel runner was
+retired and the vendored C/C++ tools don't cross-compile cleanly). On macOS,
+`pip install retrotool[asar]` (etc.) falls back to the **sdist**, which builds
+the tool from source for your machine's native architecture at install time —
+so you need a build toolchain (Xcode command-line tools, plus `autoconf`/
+`automake`/`libtool` and `cmake` for the autotools/CMake-based tools).
+Alternatively, every wrapper falls back to a matching tool already on your
+`PATH` (`asar`, `bass`, `xdelta3`, `ca65`/`SuperFamiconv`, …), so a
+Homebrew/system install of the underlying tool works without the extra.
+
 retrotool drives a complete libSFX build end-to-end with no external toolchain install. The assembler is selectable per project: ca65 (via `libsfx`), asar (`kind="asar"`), or bass v18 (`kind="bass"`). See [libSFX assembly projects](#libsfx-assembly-projects) below and [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough.
 
 ### Library-or-CLI, your call
