@@ -76,6 +76,9 @@ def _build_xdelta3() -> None:
             "/DSIZEOF_UNSIGNED_LONG_LONG=8",
             "/DSIZEOF_UNSIGNED_LONG=4",
             "/DSIZEOF_UNSIGNED_INT=4",
+            # Disable the external-LZMA secondary compressor (needs lzma.h,
+            # not vendored). DJW + FGK secondary compressors stay enabled.
+            "/DSECONDARY_LZMA=0",
         ]))
         # The vendored xdelta3.vcxproj pins the VS2013 toolset (v120), which
         # isn't installed on modern runners. Retarget to the current toolset
