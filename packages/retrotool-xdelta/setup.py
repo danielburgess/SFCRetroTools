@@ -66,10 +66,15 @@ def _build_xdelta3() -> None:
 
     env = os.environ.copy()
     if sys.platform == "win32":
+        # The vendored xdelta3.vcxproj pins the VS2013 toolset (v120), which
+        # isn't installed on modern runners. Retarget to the current toolset
+        # and let msbuild pick the latest installed Windows 10 SDK.
         subprocess.check_call(
             [
                 "msbuild", "xdelta3.vcxproj",
                 "/p:Configuration=Release", "/p:Platform=x64",
+                "/p:PlatformToolset=v143",
+                "/p:WindowsTargetPlatformVersion=10.0",
             ],
             cwd=XDELTA_SRC, env=env,
         )
