@@ -244,6 +244,16 @@ def parse_project_toml_dict(
     for k in ("version", "revision"):
         if isinstance(mb.get(k), str):
             seed_attrs[k] = mb[k]
+    # `build_lang` (or an explicit `[rom.build] lang`) feeds the `${lang}`
+    # interpolation var, so section conditions like `if="${lang}==br_pt"`
+    # follow the build language instead of being pinned separately. `-D lang=`
+    # still wins (build_vars layers defines on top). The source-dir selection
+    # and validation for build_lang happen below, once data_dirs_by_lang is
+    # populated — this only seeds the interpolation value.
+    if isinstance(mb.get("lang"), str) and mb["lang"]:
+        seed_attrs["lang"] = mb["lang"]
+    elif isinstance(data.get("build_lang"), str) and data["build_lang"]:
+        seed_attrs["lang"] = data["build_lang"]
     vars = build_vars(seed_attrs, defines)
     mb = _interpolate_tree(mb, vars, source=source)
 
@@ -331,6 +341,29 @@ def parse_project_toml_dict(
             lang = k[:-len("_data_dir")].lower()
             if lang:
                 spec.data_dirs_by_lang[lang] = v
+
+    # Register `en_data_dir` under data_dirs_by_lang["en"] too, so `build_lang =
+    # "en"` (and `extract --lang en`) resolve symmetrically with the generic
+    # `*_data_dir=` scalars above.
+    if spec.en_data_dir:
+        spec.data_dirs_by_lang.setdefault("en", spec.en_data_dir)
+
+    # `build_lang = "xx"` selects which language THIS project BUILDS. The build's
+    # source-text root (used for DataDef `{root}/{name}.txt` autodefaults) becomes
+    # data_dirs_by_lang["xx"], independent of `en_data_dir` — so `en_data_dir` can
+    # keep naming the English source even when the project builds another language.
+    # Mirrors `extract --lang`. Absent → unchanged (build reads `en_data_dir`).
+    build_lang = data.get("build_lang")
+    if isinstance(build_lang, str) and build_lang:
+        key = build_lang.lower()
+        src = spec.data_dirs_by_lang.get(key)
+        if not src:
+            known = sorted(spec.data_dirs_by_lang.keys())
+            raise SchemaError(
+                f"build_lang {build_lang!r}: no `{key}_data_dir=` scalar in "
+                f"project.toml (known langs: {known})"
+            )
+        spec.en_data_dir = src
 
     # `[extract]` table — opt-in extract-phase config. Currently supports
     # `default_lang = "xx"`; placeholder for future extract-only overrides.

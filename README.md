@@ -655,6 +655,26 @@ The same pipeline accepts the retrotool-idiomatic `[build]` table in a
 front-end you prefer per project, or reference MBXML fragments from
 `project.toml` via `<include>`.
 
+**Per-language source roots.** Declare a `<code>_data_dir=` scalar per
+language at the top level; `DataDef` `file=` auto-defaults resolve to
+`<root>/<name>.txt`. `en_data_dir` is the default build source root, and
+`extract --lang CODE` targets any declared root.
+
+```toml
+en_data_dir    = "data/en"
+br_pt_data_dir = "data/br_pt"
+build_lang     = "br_pt"      # build from data/br_pt instead of en_data_dir
+```
+
+`build_lang = "xx"` selects which language the build sources its text from —
+the source root becomes `xx_data_dir` instead of `en_data_dir`, so you can keep
+`en_data_dir` honestly naming the English source while building another
+language. It also feeds the `${lang}` interpolation variable, so section
+conditions like `if="${lang}==br_pt"` follow the build language automatically.
+Precedence for `${lang}`: `-D lang=` > explicit `[rom.build] lang =` >
+`build_lang`. Omit `build_lang` and behavior is unchanged (build reads
+`en_data_dir`).
+
 ## libSFX assembly projects
 
 The `retrotool[libsfx]` extra bundles the Optiroc SNES toolchain (libSFX

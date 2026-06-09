@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.3 — 2026-06-08
+
+### `build_lang` — select the build's source-text language
+
+A new top-level `build_lang = "xx"` scalar in `project.toml` chooses which
+language the build sources its script text from: the build's source-text root
+becomes `data_dirs_by_lang["xx"]` (i.e. the matching `xx_data_dir=` scalar)
+instead of `en_data_dir`. This lets a project keep honestly-named per-language
+roots (`en_data_dir = "data/en"`, `br_pt_data_dir = "data/br_pt"`) and build a
+non-English language without repurposing `en_data_dir`. `en_data_dir` is now
+also registered under `data_dirs_by_lang["en"]`, so `build_lang = "en"` and
+`extract --lang en` resolve symmetrically. Absent `build_lang` → unchanged
+(build reads `en_data_dir`). Unknown lang raises `SchemaError`.
+
+`build_lang` also feeds the `${lang}` interpolation variable, so section
+conditions like `if="${lang}==br_pt"` follow the build language automatically
+instead of being pinned in a second place. Precedence: `-D lang=` (CLI) >
+explicit `[rom.build] lang =` > `build_lang`. With no `build_lang`, `${lang}`
+is unset unless declared, exactly as before.
+
 ## 0.9.2 — 2026-05-27
 
 The full ROM-hacking toolkit (library + CLI) — address math, compression,

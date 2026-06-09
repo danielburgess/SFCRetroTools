@@ -219,6 +219,81 @@ def test_extract_via_toml_frontend(tmp_path):
     assert (tmp_path / "dump.bin").read_bytes() == b"\xDE\xAD\xBE\xEF\xCA\xFE\xBA\xBE"
 
 
+# ---- build_lang: pick the build's source-text root by language ------------
+
+
+def _rom_only():
+    return {"rom": {"file": "base.sfc", "build": {"sections": []}}}
+
+
+def test_build_lang_selects_source_dir_without_touching_en():
+    data = {
+        **_rom_only(),
+        "en_data_dir": "data/en",
+        "br_pt_data_dir": "data/br_pt",
+        "build_lang": "br_pt",
+    }
+    spec = parse_project_toml_dict(data)
+    # The build's source-text root is the br_pt dir...
+    assert spec.en_data_dir == "data/br_pt"
+    # ...and both languages are registered for extract/build selection.
+    assert spec.data_dirs_by_lang["en"] == "data/en"
+    assert spec.data_dirs_by_lang["br_pt"] == "data/br_pt"
+
+
+def test_build_lang_absent_leaves_en_data_dir():
+    data = {**_rom_only(), "en_data_dir": "data/en", "br_pt_data_dir": "data/br_pt"}
+    spec = parse_project_toml_dict(data)
+    assert spec.en_data_dir == "data/en"
+
+
+def test_build_lang_en_is_noop():
+    data = {**_rom_only(), "en_data_dir": "data/en", "build_lang": "en"}
+    spec = parse_project_toml_dict(data)
+    assert spec.en_data_dir == "data/en"
+
+
+def test_build_lang_unknown_raises():
+    data = {**_rom_only(), "en_data_dir": "data/en", "build_lang": "de"}
+    with pytest.raises(SchemaError, match="build_lang"):
+        parse_project_toml_dict(data)
+
+
+def test_build_lang_feeds_lang_interp_var():
+    data = {
+        **_rom_only(),
+        "en_data_dir": "data/en",
+        "br_pt_data_dir": "data/br_pt",
+        "build_lang": "br_pt",
+    }
+    spec = parse_project_toml_dict(data)
+    # build_lang seeds ${lang}, so `if="${lang}==br_pt"` follows the build.
+    assert spec.vars["lang"] == "br_pt"
+
+
+def test_explicit_build_lang_attr_overrides_build_lang_for_interp():
+    data = {
+        "rom": {"file": "base.sfc", "build": {"lang": "xx", "sections": []}},
+        "en_data_dir": "data/en",
+        "br_pt_data_dir": "data/br_pt",
+        "build_lang": "br_pt",
+    }
+    spec = parse_project_toml_dict(data)
+    assert spec.vars["lang"] == "xx"          # explicit [rom.build] lang wins for ${lang}
+    assert spec.en_data_dir == "data/br_pt"   # build_lang still selects the source dir
+
+
+def test_define_lang_overrides_build_lang_for_interp():
+    data = {
+        **_rom_only(),
+        "en_data_dir": "data/en",
+        "br_pt_data_dir": "data/br_pt",
+        "build_lang": "br_pt",
+    }
+    spec = parse_project_toml_dict(data, defines={"lang": "jp"})
+    assert spec.vars["lang"] == "jp"          # -D lang= wins over build_lang
+
+
 # ---- include mechanism ----------------------------------------------------
 
 
