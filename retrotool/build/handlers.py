@@ -84,7 +84,10 @@ def _resolve(file: Path, root: Path) -> Path:
     return (root / p).resolve()
 
 
-def _resolve_pointer_table_pc(pointer_table, addr_type: int):
+def _resolve_pointer_table_pc(pointer_table, addr_type: int, *,
+                              rom_len: Optional[int] = None,
+                              table_len: int = 0,
+                              source: str = ""):
     """Resolve a spec ``pointer_table`` to a ``(pc_offset, SFCAddress)`` pair.
 
     ``pointer_table`` is always a **PC file offset** (it comes from DataDef
@@ -94,11 +97,37 @@ def _resolve_pointer_table_pc(pointer_table, addr_type: int):
     (e.g. PC ``0x1BCA4`` read as ``$01:BCA4`` resolves to a different PC). The
     returned :class:`SFCAddress` view is positioned at that PC offset so callers
     can derive the table's bank byte in the ROM's mapping via ``addr_type``.
+
+    This is the SINGLE point of truth for that convention — build handlers
+    AND the extract pipeline both resolve through here, so the two sides can
+    never disagree about where a pointer table lives (they used to: extract
+    tried SNES-first, which silently coincides in HiROM but reads the wrong
+    PC in LoROM).
+
+    With ``rom_len`` given, validates that the table (``table_len`` bytes)
+    fits inside the ROM. A value that only makes sense as a SNES address is
+    diagnosed explicitly — the error names the PC offset to author instead —
+    rather than crashing later or extracting from the wrong place.
     """
     from retrotool.core.address import SFCAddress, SFCAddressType
 
-    ptr_addr = SFCAddress(pointer_table, SFCAddressType.PC)
-    return ptr_addr.get_address(SFCAddressType.PC), ptr_addr
+    pc = int(pointer_table)
+    ptr_addr = SFCAddress(pc, SFCAddressType.PC)
+    if rom_len is not None and pc + table_len > rom_len:
+        alt = SFCAddress(pc, addr_type).get_address(SFCAddressType.PC)
+        if alt is not None and alt + table_len <= rom_len:
+            raise HandlerError(
+                f"{source}: pointer table offset ${pc:06X} is outside the ROM "
+                f"(size ${rom_len:06X}) when read as a PC file offset, but "
+                f"resolves as a SNES address to PC ${alt:06X} under this "
+                f"mapping. pointers.offset / pointer-table= takes a PC file "
+                f"offset — author ${alt:06X} instead."
+            )
+        raise HandlerError(
+            f"{source}: pointer table read of {table_len}b at PC ${pc:06X} "
+            f"exceeds ROM size ${rom_len:06X}"
+        )
+    return pc, ptr_addr
 
 
 def _read_concat(section: Section, root: Path) -> bytes:
@@ -1169,9 +1198,13 @@ def handle_script(
     # SFCAddress is also used below for the sentinel-passthrough decode.
     from retrotool.core.address import SFCAddress, SFCAddressType
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
-    ptr_tbl_pc, _ptr_addr = _resolve_pointer_table_pc(section.pointer_table, addr_type)
-    ptr_tbl_bank = _ptr_addr.get_bank_byte(addr_type)
     ptr_tbl_len = count * ptr_size
+    ptr_tbl_pc, _ptr_addr = _resolve_pointer_table_pc(
+        section.pointer_table, addr_type,
+        rom_len=len(rom), table_len=ptr_tbl_len,
+        source=section.source or "<script>",
+    )
+    ptr_tbl_bank = _ptr_addr.get_bank_byte(addr_type)
     data_start = ptr_tbl_pc + ptr_tbl_len
 
     # Overflow strategy (optional). Built from `section.overflow` via the
@@ -2130,22 +2163,18 @@ def _script_prepare_overflow(
     # Original pointers — 2-byte, bank implicit from ptr_tbl's bank.
     # Use section.address_type (populated from [rom].mapping by driver) instead
     # of hardcoding LoROM1, so HiROM/SA-1/etc. projects resolve correctly.
-    # section.pointer_table may be either a SNES address (`offset = "$8586E4"`)
-    # or a PC offset depending on how the TOML/MBXML was authored — both work
-    # because we always pass it as the input to SFCAddress(value, addr_type)
-    # and read out the PC form for indexing.
     count = int(section.count)
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
-    # section.pointer_table is a PC offset: it comes from DataDef pointers.offset
-    # (parse_snes_addr returns the authored number as-is, no SNES→PC conversion)
-    # and is the SAME value used as the PC write target via section.offset.
-    # Construct as PC, then derive the table's bank byte in the ROM's mapping
-    # for assembling the per-entry pointers below. (Interpreting it as a SNES
-    # addr of addr_type was wrong — e.g. PC 0x13100 read as LoROM $01:3100 is
-    # unmapped, and PC 0x1BCA4 read as $01:BCA4 resolves to the WRONG PC.)
-    ptr_addr = SFCAddress(section.pointer_table, SFCAddressType.PC)
+    # section.pointer_table is a PC offset — resolved through the shared
+    # `_resolve_pointer_table_pc` (single point of truth; see its docstring),
+    # which also bounds-checks the table read and diagnoses SNES-authored
+    # values with the PC offset to use instead.
+    ptr_tbl_pc, ptr_addr = _resolve_pointer_table_pc(
+        section.pointer_table, addr_type,
+        rom_len=len(rom_snapshot), table_len=count * 2,
+        source=section.source or "<script windowed>",
+    )
     ptr_bank = ptr_addr.get_bank_byte(addr_type)
-    ptr_tbl_pc = ptr_addr.get_address(SFCAddressType.PC)
     orig_pcs: list[int] = []
     for i in range(count):
         off = ptr_tbl_pc + i * 2

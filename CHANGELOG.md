@@ -32,6 +32,20 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### Fixed: extract misread `pointers.offset` as a SNES address
+
+`pointers.offset` / `pointer-table=` is a **PC file offset** — that was
+always the build handlers' contract, but the extract pipeline tried a
+SNES-address interpretation first. The two coincide numerically in HiROM's
+mirror ranges (so HiROM projects like rbshura never noticed), but in LoROM
+a pointer table at PC `0x8000-0xFFFF` was unconfigurable: PC-authored
+values silently extracted from the wrong place (`$008000` misread as SNES
+`$00:8000` = PC 0), and SNES-authored values crashed the build with
+`NoneType >> int`. Extract now resolves through the same
+`_resolve_pointer_table_pc` helper the build uses, which also
+bounds-checks the table read and — when a value only makes sense as a SNES
+address — raises an error naming the PC offset to author instead.
+
 ### `examples/translation-project/` — runnable quickstart
 
 A complete translation project: annotated `project.toml` + DataDef, JP/EN

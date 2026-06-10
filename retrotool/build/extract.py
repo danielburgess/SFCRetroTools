@@ -233,33 +233,26 @@ def _extract_script_pointer_table(
     # that drive a handler directly without going through `extract()`.
     addr_type = section.address_type if section.address_type is not None else SFCAddressType.LOROM1
 
-    # `section.pointer_table` can come in two shapes depending on the
-    # section's provenance:
-    #   - DataDef-derived: `pointers.offset` was a SNES address in TOML
-    #     (e.g. `$8586E4`), passed through `parse_snes_addr` as an int.
-    #     Needs SNES→PC conversion under the spec's mapping.
-    #   - Inline MBXML / legacy: the value is already a PC offset.
-    # We try SNES first; if that yields None (the int doesn't resolve in
-    # SNES space under this mapping), fall back to PC interpretation —
-    # preserves the historical behavior of the build pipeline.
-    ptr_tbl_pc_raw = section.pointer_table
-    converted = SFCAddress(ptr_tbl_pc_raw, addr_type).get_address(SFCAddressType.PC)
-    ptr_tbl_pc = converted if converted is not None else ptr_tbl_pc_raw
+    # `section.pointer_table` is a PC file offset — resolved through the
+    # SAME helper the build handlers use (`_resolve_pointer_table_pc`), so
+    # extract and build can never disagree about where the table lives.
+    # (Extract used to try a SNES-first interpretation here; that silently
+    # coincides with PC in HiROM's mirror ranges but reads the WRONG PC in
+    # LoROM — e.g. PC $008000 misread as SNES $00:8000 = PC 0. The helper
+    # also diagnoses SNES-authored values with the PC offset to use instead.)
+    from retrotool.build.handlers import _resolve_pointer_table_pc
     count = int(section.count)
     ptr_tbl_len = count * ptr_size
-    if ptr_tbl_pc + ptr_tbl_len > len(rom):
-        raise HandlerError(
-            f"{section.source}: ptr table read of {ptr_tbl_len}b at "
-            f"{ptr_tbl_pc:#x} exceeds ROM size {len(rom):#x}"
-        )
+    ptr_tbl_pc, ptr_addr = _resolve_pointer_table_pc(
+        section.pointer_table, addr_type,
+        rom_len=len(rom), table_len=ptr_tbl_len,
+        source=section.source or "<script pointer-table>",
+    )
 
     # Bank byte for 2-byte pointers: take the bank of the SNES address
     # whose PC equals ptr_tbl_pc under the active mapping. For 3-byte
     # pointers each entry carries its own bank so this isn't needed.
-    if ptr_size == 2:
-        bank_hi = SFCAddress(ptr_tbl_pc, SFCAddressType.PC).get_bank_byte(addr_type)
-    else:
-        bank_hi = 0
+    bank_hi = ptr_addr.get_bank_byte(addr_type) if ptr_size == 2 else 0
 
     ptr_bytes = bytes(rom[ptr_tbl_pc:ptr_tbl_pc + ptr_tbl_len])
 
