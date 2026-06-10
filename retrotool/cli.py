@@ -13,6 +13,10 @@ Subcommands:
                            [--script-step-progress N]
                            [-j N] [--progress|--no-progress] [-D NAME=VALUE]
     retrotool extract <path> [--lang CODE | --dest DIR] [--only/--skip ...]
+    retrotool edit [<dir>]
+    retrotool lang list [<dir>]
+    retrotool lang new  [<dir>] [--from CODE] [--to CODE]
+                        [--fork-all] [--yes] [--dry-run]
     retrotool migrate <path> [--in-place]
     retrotool libsfx scaffold <dir> [--template NAME]
     retrotool libsfx build    [<dir>] [--debug 0|1|2] [-o out.sfc]
@@ -312,6 +316,101 @@ def _cmd_mbuild_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_edit(args: argparse.Namespace) -> int:
+    from retrotool.script.script_editor import run_editor
+    return run_editor(Path(args.dir))
+
+
+# ---- language staging -------------------------------------------------------
+
+def _cmd_lang_list(args: argparse.Namespace) -> int:
+    import tomllib
+
+    from retrotool.project.language import declared_languages
+
+    root = Path(args.dir).resolve()
+    pt = root / "project.toml"
+    if not pt.exists():
+        sys.stderr.write(f"error: no project.toml in {root}\n")
+        return 2
+    cfg = tomllib.loads(pt.read_text(encoding="utf-8"))
+    langs = declared_languages(cfg)
+    build_lang = cfg.get("build_lang") or (langs[0] if langs else None)
+    if not langs:
+        print("no <lang>_data_dir scalars declared in project.toml")
+        return 0
+    for lang in langs:
+        marker = " *" if lang == build_lang else ""
+        print(f"  {lang}  ->  {cfg[f'{lang}_data_dir']}{marker}")
+    if build_lang:
+        print(f"build_lang = {build_lang}  (* = built by `retrotool build`)")
+    return 0
+
+
+def _cmd_lang_new(args: argparse.Namespace) -> int:
+    import tomllib
+
+    from retrotool.project.language import (
+        LanguageSetupError, apply_plan, build_language_plan,
+        declared_languages, format_plan,
+    )
+
+    root = Path(args.dir).resolve()
+    pt = root / "project.toml"
+    if not pt.exists():
+        sys.stderr.write(f"error: no project.toml in {root}\n")
+        return 2
+    cfg = tomllib.loads(pt.read_text(encoding="utf-8"))
+    langs = declared_languages(cfg)
+    print(f"project: {root}")
+    print(f"available languages: {', '.join(langs) or 'none'}"
+          + (f"   (build_lang = {cfg['build_lang']})" if "build_lang" in cfg else ""))
+
+    src = args.src_lang
+    if not src:
+        default = "en" if "en" in langs else (langs[0] if langs else "en")
+        src = input(f"Stage assets FROM which language? [{default}]: ").strip() or default
+    new = args.new_lang
+    if not new:
+        new = input("NEW language code (e.g. fr, de, br_pt): ").strip()
+    if new in langs:
+        print(f"warning: `{new}` is already declared in project.toml — the "
+              f"plan will only repair missing copies / repoints.")
+
+    try:
+        plan = build_language_plan(root, src, new, fork_all=args.fork_all)
+    except LanguageSetupError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    print()
+    print(format_plan(root, plan))
+
+    if args.dry_run:
+        print("\n(dry run — nothing written)")
+        return 0
+    if plan.empty:
+        return 0
+    if not args.yes:
+        ok = input("\nApply this plan? [y/N]: ").strip().lower()
+        if ok not in ("y", "yes"):
+            print("aborted — nothing written.")
+            return 0
+    try:
+        apply_plan(plan)
+    except LanguageSetupError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    dest = (plan.copies[0][1].relative_to(root)
+            if plan.copies else f"data/{new}")
+    print(f"\nOK — project staged for `{new}`.")
+    print(f"  * translate the files in {dest} "
+          f"(`retrotool edit` follows build_lang automatically)")
+    print(f"  * edit the forked encoding table / font / art for any new "
+          f"glyphs `{new}` needs")
+    print("  * build as usual; the ROM lands in out/ under the new [rom] name")
+    return 0
+
+
 def _cmd_mbuild_migrate(args: argparse.Namespace) -> int:
     from retrotool.build import migrate_project
     text = migrate_project(Path(args.path), in_place=args.in_place)
@@ -398,6 +497,50 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="override a spec variable (e.g. -D version=en); "
                          "repeatable.")
     ex.set_defaults(func=_cmd_mbuild_extract)
+
+    # edit
+    ed = sub.add_parser(
+        "edit",
+        help="open the GUI script editor for a translation project "
+             "(requires the [editor] extra: pip install 'retrotool[editor]')")
+    ed.add_argument("dir", nargs="?", default=".",
+                    help="project directory containing project.toml "
+                         "(default: .). Editor behavior is configured via "
+                         "the optional [editor] tables in project.toml.")
+    ed.set_defaults(func=_cmd_edit)
+
+    # lang
+    lang = sub.add_parser(
+        "lang", help="manage a project's translation languages")
+    lang_sub = lang.add_subparsers(dest="lang_cmd", required=True)
+
+    ll = lang_sub.add_parser(
+        "list", help="show the languages declared via <lang>_data_dir")
+    ll.add_argument("dir", nargs="?", default=".",
+                    help="project directory (default: .)")
+    ll.set_defaults(func=_cmd_lang_list)
+
+    ln = lang_sub.add_parser(
+        "new",
+        help="stage the project for a new translation language: copy the "
+             "script folder, fork language-bearing assets (tables / fonts / "
+             "art), and repoint project.toml — with a printed plan and a "
+             "confirmation prompt before anything is written")
+    ln.add_argument("dir", nargs="?", default=".",
+                    help="project directory (default: .)")
+    ln.add_argument("--from", dest="src_lang", default=None, metavar="CODE",
+                    help="language to stage assets FROM (default: prompt, en)")
+    ln.add_argument("--to", dest="new_lang", default=None, metavar="CODE",
+                    help="new language code, e.g. fr / de / br_pt "
+                         "(default: prompt)")
+    ln.add_argument("--fork-all", action="store_true",
+                    help="also fork shared asar/python patch files (default: "
+                         "engine patches are shared between languages)")
+    ln.add_argument("--yes", action="store_true",
+                    help="apply without the confirmation prompt")
+    ln.add_argument("--dry-run", action="store_true",
+                    help="show the plan, write nothing")
+    ln.set_defaults(func=_cmd_lang_new)
 
     # migrate
     mg = sub.add_parser("migrate", help="rewrite legacy MBuild 1.29 elements to unified form")

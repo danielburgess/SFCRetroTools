@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### `retrotool edit` — project-generic GUI script editor
+
+The rbshura script editor now ships as a general tool: `retrotool edit [DIR]`
+opens any retrotool translation project. Configuration is the new optional
+`[editor]` / `[editor.control_codes]` / `[editor.preview]` /
+`[editor.files."stem"]` tables in `project.toml`
+(see :mod:`retrotool.script.editor_config` and the README CLI Reference);
+with no configuration it follows `build_lang` + `<lang>_data_dir`, discovers
+`tables/*_<lang>.tbl`, pairs a `jp` dir as the read-only reference column, and
+runs text-only until a font is configured. Control-code semantics (newline /
+page-break / terminator / opcode lengths / speaker-palette opcode) are fully
+configurable; the F7-FF scheme is the default. Script files round-trip in
+their original encoding (UTF-16 or UTF-8, BOM-sniffed), and overflow-mode
+`<<<window …>>>` markers are preserved but excluded from preview/byte counts.
+New `editor` extra installs the GUI deps: `pip install 'retrotool[editor]'`.
+
+### `retrotool lang new` / `lang list` — stage a new translation language
+
+Adopted from the rbshura project's `tools/setup_language.py` (written generic
+from the start) into `retrotool.project.language`. `retrotool lang new
+--from en --to fr` copies the script folder, adds `fr_data_dir`, sets
+`build_lang`, re-suffixes `[rom] name`, and forks every language-bearing
+asset the tomls point at (encoding tables, `bin` fonts, `graphics` art) while
+keeping `asar`/`python` engine patches shared (`--fork-all` to fork those
+too). Prints the full plan and confirms before writing; TOML edits are
+textual so comments survive; re-runs degrade to repair passes. The port also
+fixes a re-run bug where `[rom] name` gained a double suffix
+(`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
+active `build_lang`.
+
 ## 0.9.3 — 2026-06-08
 
 ### `build_lang` — select the build's source-text language

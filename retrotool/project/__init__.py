@@ -9,6 +9,14 @@ from retrotool.project.datadef import (
     TABLE_TYPES,
     datadef_from_dict,
 )
+from retrotool.project.language import (
+    LanguagePlan,
+    LanguageSetupError,
+    apply_plan,
+    build_language_plan,
+    declared_languages,
+    format_plan,
+)
 from retrotool.project.loader import load_datadef, load_datadefs, load_project
 from retrotool.project.schema import (
     BuildSection,
@@ -38,6 +46,12 @@ __all__ = [
     "RelocationSection",
     "TABLE_TYPES",
     "COMPRESSION_TYPES",
+    "LanguagePlan",
+    "LanguageSetupError",
+    "apply_plan",
+    "build_language_plan",
+    "declared_languages",
+    "format_plan",
     "load_project",
     "load_datadef",
     "load_datadefs",

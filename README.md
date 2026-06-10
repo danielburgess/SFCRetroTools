@@ -1,6 +1,6 @@
 # retrotool
 
-**SNES/SFC ROM hacking *and* development toolkit** — v0.9.2
+**SNES/SFC ROM hacking *and* development toolkit** — v0.9.3
 
 A Python library that consolidates the tooling scattered across multiple ROM-hacking projects
 into a single installable package: address math, ROM header handling, tile/palette/sprite codecs,
@@ -21,7 +21,7 @@ Built with automation in mind for **both directions** of SNES/SFC work:
 Static analysis, live debugger IPC, patch builds, asset export, and from-scratch assembly all
 wire into a single scriptable pipeline instead of a pile of one-off tools.
 
-v0.9.2 is the current release of the post-rewrite scope — the full toolkit (library + CLI,
+v0.9.3 is the current release of the post-rewrite scope — the full toolkit (library + CLI,
 example projects, and a pytest suite). The 0.1 line (address-only) still works through
 compatibility shims.
 
@@ -224,6 +224,129 @@ retrotool extract my-game/ --lang en --only script,fixed-records
 
 # Re-extract with a different `version=` define (e.g. extract patched-side data)
 retrotool extract my-game/ --lang en -D version=patched
+```
+
+---
+
+### `retrotool edit`
+
+Open the GUI script editor for a translation project. Three-pane pywebview window: script
+files → entries → editor, with the editable language and a read-only reference language
+(e.g. the JP source) side by side, live encoded-byte counts, width-overflow warnings, and
+an optional pixel-accurate dialog preview rendered from the game's own font.
+
+```
+retrotool edit [<dir>]
+```
+
+| flag | description |
+|---|---|
+| `dir` | project directory containing `project.toml` (default: `.`). |
+
+Requires the `editor` extra (`pip install 'retrotool[editor]'` — pywebview + Pillow).
+
+**Zero-config:** in a standard retrotool project the editor follows `build_lang` and the
+`<lang>_data_dir` scalars to find your script files, discovers `tables/*_<lang>.tbl` for
+byte counting, pairs a `jp` data dir as the reference column when one exists, and runs
+text-only (no pixel preview) until a font is configured.
+
+**Configuration** lives in the optional `[editor]` tables of `project.toml` (all keys
+optional; see `retrotool/script/editor_config.py` for the authoritative schema):
+
+```toml
+[editor]
+lang            = "en"               # default: build_lang
+data_dir        = "data/en"          # default: ${lang}_data_dir
+reference_lang  = "jp"               # read-only comparison column
+table           = "tables/game_${lang}.tbl"
+file_patterns   = ["scenario_*.txt"] # globs scanned in data_dir (default ["*.txt"])
+cols_per_line   = 24                 # dialog width for overflow checks
+
+[editor.control_codes]               # defaults match the common F7-FF scheme
+newline      = "FD"                  # explicit line-break byte
+page_break   = "FE"
+terminator   = "FF"
+palette_code = "F9"                  # speaker-palette opcode ("" disables)
+opcodes      = { F7 = 2, F8 = 2, F9 = 2, FA = 2, FB = 2 }  # total length incl. opcode
+
+[editor.control_codes.subcodes.FC]   # opcodes whose length depends on a sub-command byte
+default = 3
+"02"    = 4
+
+[editor.preview]                     # omit entirely for a text-only editor
+font             = "fonts/game_font.bin"  # 2bpp glyph bin → enables the pixel preview
+font_slot_stride = 64
+glyph_width      = 8
+glyph_height     = 16
+palette_table    = "0x058313"        # PC offset of a speaker palette table in the ROM
+kanji_font_offset = "0x104000"       # escape-coded 16x16 kanji font (optional)
+kanji_table      = "tables/kanji.tbl"
+
+[editor.files."intro"]               # per-file render overrides, keyed by file stem
+cols_per_line = 32
+kanji_escape  = true                 # page_break byte acts as a 2-byte kanji escape
+mixed_width   = true                 # half/full-width glyphs at natural pixel widths
+forced_wrap   = true                 # in-game renderer wraps; skip overflow checks
+```
+
+Entry bodies use the retrotool script-dump format (`<<$ADDR:idx[$N]>>` headers, `[XX]`
+control bytes); `<<<window …>>>` overflow-placement markers round-trip untouched and are
+excluded from preview/byte counts. Files are saved atomically in their original encoding
+(UTF-16 dumps from `retrotool extract` and hand-written UTF-8 both round-trip). Autosave
+is debounced ~400 ms; Ctrl+S forces a flush; Ctrl+F is cross-file find/replace.
+
+---
+
+### `retrotool lang`
+
+Manage a project's translation languages. The model: each language has its own script
+root (`<lang>_data_dir = "data/<lang>"` scalars in `project.toml`), `build_lang` picks
+which one the build sources text from, and language-bearing assets (encoding tables,
+font bins, art PNGs) are forked per language while engine patches stay shared.
+
+```
+retrotool lang list [<dir>]
+retrotool lang new  [<dir>] [--from CODE] [--to CODE] [--fork-all] [--yes] [--dry-run]
+```
+
+**`lang list`** prints the declared languages, their data dirs, and which one
+`build_lang` currently builds.
+
+**`lang new`** stages the whole project for a new translation language in one step.
+It prints the full plan and asks for confirmation before writing anything:
+
+1. **Copies the script folder** `data/<from>` → `data/<to>` — translate those files in
+   place (`retrotool edit` follows `build_lang` automatically).
+2. **Updates `project.toml`**: adds `<to>_data_dir`, sets `build_lang = "<to>"`, and
+   re-suffixes `[rom] name` (`mygame_en` → `mygame_fr`, so the build lands at
+   `out/mygame_fr.sfc`).
+3. **Forks every toml-pointed language asset** next to its original with the language
+   code as suffix, and repoints the tomls at the copies: `kind = "bin"` /
+   `kind = "graphics"` sections (fonts, art) plus `[encoding] table_file` in every
+   DataDef toml under `data_dirs`. A stem already suffixed with a declared language
+   code is re-suffixed (`mygame_en.tbl` → `mygame_fr.tbl`); anything else gets `_<to>`
+   appended (`logo.png` → `logo_fr.png`).
+
+| flag | description |
+|---|---|
+| `dir` | project directory (default: `.`). |
+| `--from CODE` | language to stage assets FROM (default: prompts, suggesting `en`). |
+| `--to CODE` | new language code, e.g. `fr` / `de` / `br_pt` (default: prompts). |
+| `--fork-all` | also fork shared `asar`/`python` engine-patch files. By default those (and the `[rom] file` source ROM) are shared between languages and left alone. |
+| `--yes` | apply without the confirmation prompt (CI / scripting). |
+| `--dry-run` | print the plan, write nothing. |
+
+TOML files are edited *textually* (exact quoted-string replacement, verified at apply
+time), so comments and formatting survive. Re-running for an already-staged language is
+safe — the plan degrades to a repair pass that only fills in missing copies/repoints.
+The original language's files are never modified, so languages coexist on one checkout;
+switch between them by editing `build_lang`. Library API:
+`retrotool.project.build_language_plan` / `apply_plan` / `format_plan`.
+
+```bash
+retrotool lang new --from en --to fr          # interactive confirm
+retrotool lang new --to de --dry-run          # inspect the plan only
+retrotool lang new --from en --to br_pt --yes # non-interactive
 ```
 
 ---
@@ -504,6 +627,8 @@ Text extraction + insertion using `.tbl` files.
 - `find_digraphs` / `build_dte_table` / `apply_dte` / `savings_estimate` — DTE overflow
   helpers for tight text budgets.
 - `round_trip(texts, table)` — validator that encode→decode→compares every string.
+- `script_editor` / `editor_config` — the `retrotool edit` GUI script editor and its
+  `[editor]` project.toml schema (see the CLI Reference above).
 
 ### `retrotool.debugger`
 Mesen2-Diz IPC client. Transport is a newline-delimited JSON protocol over Unix domain
