@@ -70,6 +70,25 @@ Homebrew/system install of the underlying tool works without the extra.
 
 retrotool drives a complete libSFX build end-to-end with no external toolchain install. The assembler is selectable per project: ca65 (via `libsfx`), asar (`kind="asar"`), or bass v18 (`kind="bass"`). See [libSFX assembly projects](#libsfx-assembly-projects) below and [`examples/libsfx-hello/`](examples/libsfx-hello/) for a walkthrough.
 
+### Quickstart: translation project
+
+[`examples/translation-project/`](examples/translation-project/) is a complete,
+runnable fan-translation project — annotated `project.toml`, a DataDef, JP/EN
+table files, extracted + translated script, and a generator that synthesizes
+the "game" ROM so the whole loop runs without any copyrighted ROM:
+
+```bash
+cd examples/translation-project
+python tools/make_demo_rom.py     # stand-in source ROM
+retrotool build .                 # -> out/demo_en.sfc (EN script inserted)
+retrotool edit .                  # GUI script editor (JP reference column)
+retrotool lang new --to fr        # stage a third language
+```
+
+Copy the directory as the starting point for a real project — its README walks
+through adapting every piece. A CI test builds the example on every run, so it
+can't silently rot.
+
 ### Library-or-CLI, your call
 
 Every capability is reachable from both a CLI subcommand **and** a plain

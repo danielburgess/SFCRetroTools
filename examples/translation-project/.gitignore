@@ -1,0 +1,7 @@
+# Never commit ROMs (copyright) or build output.
+roms/
+out/
+.venv/
+.cache/
+.editor-state.json
+__pycache__/

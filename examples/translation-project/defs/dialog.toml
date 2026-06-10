@@ -1,0 +1,47 @@
+# dialog.toml — DataDef for the demo game's dialog script.
+#
+# A DataDef describes ONE block of game data declaratively: where its
+# pointer table lives, how strings are encoded, and how the build should
+# place the translated replacement. `retrotool extract` reads this to dump
+# the script to text; `retrotool build` reads it to insert the translation.
+# Discovered automatically because project.toml lists this folder in
+# `data_dirs`.
+
+[table]
+# `name` drives the default script filename: data/<lang>/<name>.txt
+name = "dialog"
+type = "pointer"
+
+[encoding]
+# The byte<->character table used to ENCODE the translated text at build
+# time. `retrotool lang new` forks this file per language and repoints it.
+# (data/jp was extracted once with table_file pointed at the JP table
+#  instead — the README shows that step.)
+table_file = "tables/game_en.tbl"
+# Every string ends with this byte in ROM; the extractor walks to it and
+# the encoder appends it.
+terminator = 0xFF
+
+[pointers]
+# The game's dialog pointer table, as a PC FILE OFFSET (hex with $).
+# 3 entries, 2 bytes each: 16-bit within-bank pointers
+# ((pc & 0x7FFF) | 0x8000) whose bank is implied by the table's own bank —
+# the most common 16-bit layout. Use size = 3 for games with 24-bit long
+# pointers; each entry then carries its own bank.
+offset = "$004000"
+count = 3
+size = 2
+
+[data]
+# Where the original strings live (PC file offsets). Informational for
+# relocate mode (entries are re-packed after the pointer table / into
+# freespace); extraction follows the pointers themselves.
+offset = "$004040"
+end = "$004080"
+
+[section]
+# How the build inserts this script. relocate = rewrite the pointer table
+# to point at the re-packed translated strings.
+kind = "script"
+[section.placement]
+mode = "relocate"

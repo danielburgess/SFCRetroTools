@@ -1,0 +1,22 @@
+# game_jp.tbl — byte <-> character table for the demo game's JAPANESE script.
+# Format: XX=c  (hex byte = the character it encodes). Lines starting with
+# # are comments. Keep in sync with tools/make_demo_rom.py (which encodes
+# the demo ROM's strings with these values).
+#
+# Control bytes (NOT listed here — they are opcodes, not characters):
+#   FD = line break    FF = end of string
+20= 
+21=!
+80=こ
+81=ん
+82=に
+83=ち
+84=は
+85=せ
+86=か
+87=い
+88=た
+89=え
+8A=わ
+8B=り
+8C=お

@@ -32,6 +32,16 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### `examples/translation-project/` — runnable quickstart
+
+A complete translation project: annotated `project.toml` + DataDef, JP/EN
+encoding tables, extracted JP script + EN translation, contributor setup
+scripts (Linux/macOS/Windows, uv-based, adapted from the rbshura project),
+and `tools/make_demo_rom.py` which synthesizes the source ROM so the full
+extract → translate → build → `lang new` loop runs with no copyrighted ROM.
+Guarded by a golden test (`tests/test_example_translation_project.py`) that
+generates, builds, and re-extracts the example on every CI run.
+
 ## 0.9.3 — 2026-06-08
 
 ### `build_lang` — select the build's source-text language
