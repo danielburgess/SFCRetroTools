@@ -32,6 +32,21 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### `docs/project-toml-reference.md` — full configuration schema
+
+Every key the parsers and handlers actually read, in one reference:
+top-level scalars (`data_dirs`, `<lang>_data_dir`, `build_lang`), `[rom]`,
+`[rom.build]` (freespace, labels, include, order, section defaults),
+`[[rom.build.sections]]` core keys plus the per-kind attribute tables
+(graphics/asar/bass/ca65/python/project/libsfx), script placement and
+overflow-strategy config, `[extract]`, `[mesen]`, `[editor]`, variable
+interpolation, and the complete DataDef schema ([table]/[encoding]/
+[pointers]/[data]/[relocation]/[section]/[[fields]]). The doc states the
+addressing convention explicitly: every ROM location in build config is a
+PC file offset. A sync test (`tests/test_config_reference_sync.py`) sweeps
+the handler sources for consumed attribute keys and fails CI when code
+grows a key the doc doesn't mention.
+
 ### Fixed: extract misread `pointers.offset` as a SNES address
 
 `pointers.offset` / `pointer-table=` is a **PC file offset** — that was

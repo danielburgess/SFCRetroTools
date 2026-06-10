@@ -89,6 +89,11 @@ Copy the directory as the starting point for a real project — its README walks
 through adapting every piece. A CI test builds the example on every run, so it
 can't silently rot.
 
+The complete configuration schema — every `project.toml` key, every section
+attribute, every DataDef key, with types and defaults — lives in
+[`docs/project-toml-reference.md`](docs/project-toml-reference.md) (also
+CI-synced against the code).
+
 ### Library-or-CLI, your call
 
 Every capability is reachable from both a CLI subcommand **and** a plain
