@@ -18,7 +18,11 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 DOC = (ROOT / "docs" / "project-toml-reference.md").read_text(encoding="utf-8")
 
-HANDLERS = (ROOT / "retrotool" / "build" / "handlers.py").read_text(encoding="utf-8")
+# handlers is a package (split 2026-06-10) — sweep every submodule.
+HANDLERS = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted((ROOT / "retrotool" / "build" / "handlers").glob("*.py"))
+)
 OVERFLOW = (ROOT / "retrotool" / "build" / "overflow.py").read_text(encoding="utf-8")
 DRIVER = (ROOT / "retrotool" / "build" / "driver.py").read_text(encoding="utf-8")
 

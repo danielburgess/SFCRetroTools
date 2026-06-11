@@ -32,6 +32,17 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### `retrotool.build.handlers` split into a package
+
+The 2,700-line `handlers.py` is now `handlers/` split by concern:
+`_base` (shared types, ROM-write/path/attr helpers, pointer encoders),
+`basic` (rep/ins/bin/graphics), `assembler` (asar/ca65/bass), `meta`
+(python/project/libsfx), `script` (relocate + overflow/windowed modes),
+`records` (fixed-records), with the dispatch registry in `__init__`.
+Pure mechanical move — the import surface is unchanged (everything
+importable from `retrotool.build.handlers` still resolves there) and no
+handler logic was modified.
+
 ### Error-handling unification (library code no longer prints / swallows)
 
 One strategy across the library: diagnostics go to module loggers, user
