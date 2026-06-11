@@ -2,11 +2,12 @@
 from retrotool.script.dte import apply_dte, build_dte_table, find_digraphs, savings_estimate
 from retrotool.script.extractor import Script, ScriptEntry, extract_script
 from retrotool.script.inserter import InsertedScript, compile_script
-from retrotool.script.table import Table
+from retrotool.script.table import Table, TableParseError
 from retrotool.script.validator import ValidationReport, check_max_length, check_pointer_range, round_trip
 
 __all__ = [
     "Table",
+    "TableParseError",
     "Script",
     "ScriptEntry",
     "extract_script",

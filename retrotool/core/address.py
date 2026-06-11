@@ -1,6 +1,13 @@
-"""SFCAddress — SNES/SFC address conversion across mapping modes."""
+"""SFCAddress — SNES/SFC address conversion across mapping modes.
+
+Invalid/unmappable addresses RETURN ``None`` (load-bearing API — callers
+probe speculative conversions and branch on None). Diagnostics go to the
+``retrotool.core.address`` logger at DEBUG level; library code never
+prints to stdout.
+"""
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Optional, Union
 
@@ -10,6 +17,8 @@ from retrotool.core.binary import (
     integer_or_hex,
     low_byte as _low_byte,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SFCAddressType:
@@ -56,7 +65,7 @@ class SFCAddress:
         else:
             raise ValueError('`address_type` parameter is invalid!')
         if verbose:
-            print(self.all())
+            logger.debug(self.all())
 
     def all(self):
         hirom = self.hirom_address
@@ -179,7 +188,7 @@ class SFCAddress:
     def pc_to_lorom1(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
         if pc_addr is None:
             if verbose:
-                print("pc_to_lorom1: Given Address is invalid.")
+                logger.debug("pc_to_lorom1: Given Address is invalid.")
             return None
         if pc_addr >= 0x400000:
             return None
@@ -193,7 +202,7 @@ class SFCAddress:
     def pc_to_lorom2(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
         if pc_addr is None:
             if verbose:
-                print("pc_to_lorom2: Given Address is invalid.")
+                logger.debug("pc_to_lorom2: Given Address is invalid.")
             return None
         if pc_addr >= 0x400000:
             return None
@@ -204,7 +213,7 @@ class SFCAddress:
     def pc_to_hirom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
         if pc_addr is None:
             if verbose:
-                print("pc_to_hirom: Given Address is invalid.")
+                logger.debug("pc_to_hirom: Given Address is invalid.")
             return None
         if pc_addr >= 0x400000:
             return None
@@ -215,7 +224,7 @@ class SFCAddress:
     def pc_to_exlorom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
         if pc_addr is None:
             if verbose:
-                print("pc_to_exlorom: Given Address is invalid.")
+                logger.debug("pc_to_exlorom: Given Address is invalid.")
             return None
         if pc_addr >= 0x7F0000:
             return None
@@ -229,7 +238,7 @@ class SFCAddress:
     def pc_to_exhirom(cls, pc_addr: int, verbose: bool = False) -> Optional[int]:
         if pc_addr is None:
             if verbose:
-                print("pc_to_exhirom: Given Address is invalid.")
+                logger.debug("pc_to_exhirom: Given Address is invalid.")
             return None
         if pc_addr >= 0x7E0000:
             return None
@@ -240,30 +249,30 @@ class SFCAddress:
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def lorom1_to_pc(cls, snes_addr: int, verbose: bool = True, fallback=False) -> Optional[int]:
+    def lorom1_to_pc(cls, snes_addr: int, verbose: bool = False, fallback=False) -> Optional[int]:
         if snes_addr is None:
             if verbose:
-                print("lorom1_to_pc: Given Address is invalid.")
+                logger.debug("lorom1_to_pc: Given Address is invalid.")
             return None
         # LoROM1 window: banks $00–$6F, pages $8000–$FFFF. The lower bound is a
         # bank/page check, not a flat min; the previous `0x8000 <= x <= 0x6FFFFF`
         # was an empty interval (start > end) that always fell through.
         if snes_addr < 0x008000 or snes_addr > 0x6FFFFF or (snes_addr & 0xFFFF) < 0x8000:
             if verbose:
-                print("Not a valid LoROM1 address!")
+                logger.debug("Not a valid LoROM1 address!")
             return cls.lorom2_to_pc(snes_addr, verbose) if fallback else None
         return snes_addr & 0x7FFF | ((snes_addr & 0x7F0000) >> 1)
 
     @classmethod
     @lru_cache(0xFFFFFF)
-    def lorom2_to_pc(cls, snes_addr: int, verbose: bool = True, fallback=False) -> Optional[int]:
+    def lorom2_to_pc(cls, snes_addr: int, verbose: bool = False, fallback=False) -> Optional[int]:
         if snes_addr is None:
             if verbose:
-                print("lorom2_to_pc: Given Address is invalid.")
+                logger.debug("lorom2_to_pc: Given Address is invalid.")
             return None
         if not (0x808000 <= snes_addr <= 0xFFFFFF):
             if verbose:
-                print("Not a valid LoROM2 address!")
+                logger.debug("Not a valid LoROM2 address!")
             return cls.lorom1_to_pc(snes_addr, verbose) if fallback else None
         return snes_addr & 0x7FFF | ((snes_addr & 0x7F0000) >> 1)
 
@@ -288,7 +297,7 @@ class SFCAddress:
         """
         if snes_addr is None:
             if verbose:
-                print("hirom_to_pc: Given Address is invalid.")
+                logger.debug("hirom_to_pc: Given Address is invalid.")
             return None
         bank = (snes_addr >> 16) & 0xFF
         offset = snes_addr & 0xFFFF
@@ -300,7 +309,7 @@ class SFCAddress:
         )
         if not in_rom:
             if verbose:
-                print(f"Invalid HiROM Address: ${bank:02X}:{offset:04X}")
+                logger.debug(f"Invalid HiROM Address: ${bank:02X}:{offset:04X}")
             return None
         return ((bank & 0x3F) << 16) | offset
 
@@ -309,10 +318,10 @@ class SFCAddress:
     def exlorom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
         if snes_addr is None:
             if verbose:
-                print("exlorom_to_pc: Given Address is invalid.")
+                logger.debug("exlorom_to_pc: Given Address is invalid.")
             return None
         if not ((0x808000 <= snes_addr <= 0xFFFFFF) or (0x008000 <= snes_addr <= 0x7DFFFF)):
-            print("Invalid ExLoROM Address!")
+            logger.debug("Invalid ExLoROM Address!")
             return None
         pc_addr = snes_addr & 0x7FFF | ((snes_addr & 0x7F0000) >> 1)
         if snes_addr < 0x800000:
@@ -324,10 +333,10 @@ class SFCAddress:
     def exhirom_to_pc(cls, snes_addr: int, verbose: bool = False) -> Optional[int]:
         if snes_addr is None:
             if verbose:
-                print("exhirom_to_pc: Given Address is invalid.")
+                logger.debug("exhirom_to_pc: Given Address is invalid.")
             return None
         if not ((0xC00000 <= snes_addr <= 0xFFFFFF) or (0x400000 <= snes_addr <= 0x7DFFFF)):
-            print("Invalid ExHiROM Address!")
+            logger.debug("Invalid ExHiROM Address!")
             return None
         pc_addr = snes_addr & 0x3FFFFF
         if snes_addr < 0xC00000:

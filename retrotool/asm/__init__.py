@@ -14,12 +14,13 @@ from retrotool.asm.libsfx import (
     scaffold_libsfx_project,
 )
 from retrotool.asm.patcher import (
-    AsarPatch, BassPatch, PatchResult, apply_bass_patch, apply_patch,
+    AsarPatch, BassPatch, PatchError, PatchResult, apply_bass_patch, apply_patch,
 )
 
 __all__ = [
     "AsarPatch",
     "BassPatch",
+    "PatchError",
     "PatchResult",
     "apply_patch",
     "apply_bass_patch",

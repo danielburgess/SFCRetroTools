@@ -24,12 +24,34 @@ from typing import Optional
 from retrotool.core.cache import BuildCache, sha256_file, sha256_many
 
 
+class PatchError(RuntimeError):
+    """An assembler patch failed. Raised by :meth:`PatchResult.check`;
+    carries the failed :class:`PatchResult` as ``.result``."""
+
+    def __init__(self, message: str, result: "PatchResult"):
+        super().__init__(message)
+        self.result = result
+
+
 @dataclass
 class PatchResult:
     ok: bool
     output_rom: Path
     log: str = ""
     cache_hit: bool = False
+
+    def check(self) -> "PatchResult":
+        """Raise :class:`PatchError` (with the assembler log) unless the
+        patch succeeded; returns self so calls chain:
+        ``apply_patch(rom, patch).check().output_rom``. Use this instead of
+        reading ``.output_rom`` directly — a forgotten ``.ok`` test reads a
+        stale or missing ROM."""
+        if not self.ok:
+            raise PatchError(
+                "assembler patch failed:\n" + (self.log.strip() or "(no log)"),
+                self,
+            )
+        return self
 
 
 @dataclass

@@ -335,8 +335,10 @@ def _load_callable(ref: str, root: Path, source: str = "") -> Callable:
         if not path.exists():
             raise HandlerError(f"{source}: module file not found: {path}")
         spec = importlib.util.spec_from_file_location(path.stem, path)
+        if spec is None or spec.loader is None:
+            raise HandlerError(
+                f"{source}: cannot import {path} as a Python module")
         mod = importlib.util.module_from_spec(spec)
-        assert spec and spec.loader
         spec.loader.exec_module(mod)
     else:
         mod = importlib.import_module(mod_ref)

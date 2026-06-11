@@ -32,6 +32,33 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### Error-handling unification (library code no longer prints / swallows)
+
+One strategy across the library: diagnostics go to module loggers, user
+input failures raise typed errors, and None-returns stay None-returns.
+
+* `retrotool.core.address` — all 16 `print()` diagnostics (including two
+  UNCONDITIONAL ones on invalid ExLoROM/ExHiROM addresses that polluted
+  stdout during normal speculative conversions) now go to the module
+  logger at DEBUG. Conversion semantics unchanged: unmappable input
+  returns `None`, silently. Also fixes `lorom1_to_pc`/`lorom2_to_pc`
+  defaulting `verbose=True` (every other converter defaults False).
+* `retrotool.script.Table` — malformed .tbl lines now raise
+  `TableParseError` listing every bad line (`file:line: text: error`)
+  after the full file is scanned, instead of printing `ERROR: ...` and
+  silently encoding wrong bytes with whatever loaded. `Table(path,
+  strict=False)` restores skip-and-continue (each skip logged as a
+  warning, counted in `.errors`). `export_csv` propagates I/O errors
+  instead of printing "I/O error"; duplicate-encoding warnings go to the
+  logger; `get_value`'s None contract is documented.
+* `retrotool.asm.PatchResult.check()` — chainable raise-on-failure
+  (`apply_patch(rom, p).check().output_rom`); raises the new `PatchError`
+  carrying the assembler log and the failed result. The easy-to-miss
+  `.ok` flag stays for callers that branch.
+* `retrotool.build` — user-reachable `assert`s (stripped under `python
+  -O`) replaced with `HandlerError`s: extract's split-write validation
+  and the python-handler module import path.
+
 ### `docs/project-toml-reference.md` — full configuration schema
 
 Every key the parsers and handlers actually read, in one reference:

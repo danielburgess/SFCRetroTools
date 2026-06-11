@@ -74,8 +74,13 @@ def _resolve_total_size(section: Section, dest_root: Path) -> tuple[int, list[in
 def _write_split(rom: bytes, section: Section, dest_root: Path,
                  splits: list[int]) -> list[Path]:
     """Read `sum(splits)` bytes from `section.offset`, write each chunk to its file."""
-    assert section.offset is not None
-    assert len(splits) == len(section.files)
+    if section.offset is None:
+        raise HandlerError(
+            f"{section.source}: <{section.kind.value}> extract requires offset=")
+    if len(splits) != len(section.files):
+        raise HandlerError(
+            f"{section.source}: {len(section.files)} output file(s) but "
+            f"{len(splits)} size split(s) — file= and size lists must match")
     out_paths: list[Path] = []
     cursor = section.offset
     for f, n in zip(section.files, splits):

@@ -1,6 +1,7 @@
 """Table file codec. .tbl format: `HH=char` lines, `**` variable substitution."""
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass, field
@@ -8,9 +9,19 @@ from math import log
 from pathlib import Path
 from typing import Optional, Union
 
+logger = logging.getLogger(__name__)
 
 _TABLE_CACHE: dict[tuple[str, int, int], "Table"] = {}
 _TABLE_CACHE_LOCK = threading.Lock()
+
+
+class TableParseError(ValueError):
+    """A .tbl file contained malformed lines.
+
+    Raised by :class:`Table` (strict mode, the default) AFTER the whole
+    file has been scanned, so the message lists every bad line at once —
+    file:line, the offending text, and the underlying error.
+    """
 
 # Pre-computed two-digit uppercase hex strings 00..FF — used to expand
 # `**`/`%%` wildcards in .tbl files without per-iteration f-string format.
@@ -69,16 +80,32 @@ def load_table(
 class Table:
     """Ported from v0.1 retrotool/script.py. Loads .tbl, encodes/decodes bytes↔text."""
 
-    def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False):
+    def __init__(self, table_file: Union[str, Path], warn_duplicates: bool = False,
+                 strict: bool = True):
+        """Load a .tbl file.
+
+        ``strict`` (default) raises :class:`TableParseError` listing every
+        malformed line after the full file has been scanned — a broken
+        table must not silently encode wrong bytes. ``strict=False``
+        restores the legacy skip-and-continue behavior (each bad line is
+        logged as a warning and counted in :attr:`errors`).
+        """
         (enc, val_map, char_map, char_bytes, ctrl_table, ctrl_prefixes,
-         ctrl_types, err_count, cnt) = self._load_table(table_file)
+         ctrl_types, parse_errors, cnt) = self._load_table(table_file)
+        if parse_errors and strict:
+            raise TableParseError(
+                f"{table_file}: {len(parse_errors)} malformed line(s):\n  "
+                + "\n  ".join(parse_errors)
+            )
+        for msg in parse_errors:
+            logger.warning("skipping malformed table line: %s", msg)
         self.__val_map = val_map
         self.__chr_map = char_map
         self.__chr_bytes = char_bytes
         self.__ctrl_table: dict[int, _CtrlEntry] = ctrl_table
         self.__ctrl_prefixes: list[int] = ctrl_prefixes  # insertion order preserved
         self.__ctrl_types = ctrl_types
-        self.__errors = err_count
+        self.__errors = len(parse_errors)
         self.__parsed_lines = cnt
         self.__file_name = table_file
         self.__encoding = enc
@@ -94,12 +121,13 @@ class Table:
             char_to_vals[ch].append(val)
         dupes = {ch: sorted(vals) for ch, vals in char_to_vals.items() if len(vals) > 1}
         if dupes:
-            print(f'WARNING: {self.__file_name} has {len(dupes)} characters '
-                  f'with duplicate encodings (round-trip mismatch risk):')
+            lines = [f'{self.__file_name} has {len(dupes)} characters '
+                     f'with duplicate encodings (round-trip mismatch risk):']
             for ch, vals in sorted(dupes.items(), key=lambda x: x[1][0]):
                 hex_vals = ', '.join(f'${v:04X}' for v in vals)
                 used = self.__chr_map.get(ch)
-                print(f'  {ch!r:8s}: {hex_vals}  (encoder uses ${used:04X})')
+                lines.append(f'  {ch!r:8s}: {hex_vals}  (encoder uses ${used:04X})')
+            logger.warning('%s', '\n'.join(lines))
 
     def _load_table(self, table_file, enc=None):
         enc = enc if enc is not None else self.detect_encoding(table_file)
@@ -114,7 +142,10 @@ class Table:
         ctrl_prefixes: list[int] = []          # insertion-ordered for stability
         ctrl_types: dict[int, str] = {}        # flat cmd→type for backcompat
         ctrl_prefix_declared = False           # first @ctrl_prefix replaces default
-        err_count = 0
+        # Malformed lines are COLLECTED (file:line + text + error), not
+        # swallowed — Table.__init__ raises TableParseError on them in
+        # strict mode, or logs each as a warning otherwise.
+        errors: list[str] = []
         cnt = 1
         with open(table_file, encoding=enc) as to:
             first = True
@@ -224,8 +255,7 @@ class Table:
                         else:
                             self._set_maps(val, ch, val_map, char_map, char_bytes)
                 except Exception as ex:
-                    print(f"ERROR: {ex!r}")
-                    err_count += 1
+                    errors.append(f"{table_file}:{cnt}: {line.strip()!r}: {ex}")
                 cnt += 1
         # If no @ctrl_prefix line appeared but @ctrl cmd entries did, fall
         # back to the historical default prefix $FF so single-prefix tables
@@ -233,7 +263,7 @@ class Table:
         if not ctrl_prefix_declared and ctrl_table:
             ctrl_prefixes = [0xFF]
             ctrl_table.setdefault(0xFF, _CtrlEntry())
-        return enc, val_map, char_map, char_bytes, ctrl_table, ctrl_prefixes, ctrl_types, err_count, cnt
+        return enc, val_map, char_map, char_bytes, ctrl_table, ctrl_prefixes, ctrl_types, errors, cnt
 
     @staticmethod
     def _set_maps(in_val, in_ch, val_map, char_map, char_bytes=None):
@@ -402,6 +432,12 @@ class Table:
         }
 
     def get_value(self, word: str, infer_value: bool = True) -> Optional[int]:
+        """Look up the byte value for `word`. Returns None — by contract —
+        both when the token is simply not in the table AND when an
+        `[XX]`-shaped token fails to parse as hex (callers probe candidate
+        tokens and treat None as "no match"; raising here would break the
+        encoder's longest-match loop). Callers needing to distinguish the
+        two cases should check `'[' in word` themselves."""
         if not isinstance(word, str):
             raise ValueError("Value must be a string!")
         if word in self.__chr_map:
@@ -551,14 +587,13 @@ class Table:
             return
         csv_columns = list(dict_data[0].keys())
         csv_file = f"./{filename}.csv"
-        try:
-            with open(csv_file, 'w', newline='') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=csv_columns)
-                writer.writeheader()
-                for row in dict_data:
-                    writer.writerow(row)
-        except IOError:
-            print("I/O error")
+        # I/O failures propagate — a caller asking for an export must learn
+        # when no file was written (this used to swallow IOError and print).
+        with open(csv_file, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=csv_columns)
+            writer.writeheader()
+            for row in dict_data:
+                writer.writerow(row)
 
     def check_for_lone_byte(self, bin_data, index, value: int = 0x0):
         """Check for lone terminator byte; confirms it's not part of multi-byte value."""
