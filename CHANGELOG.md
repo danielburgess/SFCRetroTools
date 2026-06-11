@@ -57,6 +57,18 @@ Backed by the UI-agnostic `retrotool.script.project_admin` service
 `validate_project`), reusable by future tooling. `tomlkit` joins the
 `editor` extra.
 
+The panel also includes a **section wizard**: DataDef-backed sections are
+click-to-edit (encoding table, terminator, pointer table offset/count/
+size, data region, placement mode — same diff-then-apply flow against
+the DataDef toml), and ➕ Add section creates a new commented DataDef,
+optionally seeded by a built-in **ROM pointer-table scan**
+(`retrotool.heuristics.pointers` against `[rom].file` — click a
+candidate to adopt its offset/count/width/target range). On a bare
+project the wizard bootstraps `data_dirs = ["defs"]` (inserted before
+the first table header, as TOML requires) and the `defs/` folder.
+Service additions: `read_datadef` / `update_datadef` / `diff_datadef` /
+`create_datadef` / `scan_sections`.
+
 ### `extraction` / `export` / `ai` marked experimental, with growth plans
 
 The three skeleton subsystems are now explicitly **experimental** — banner

@@ -1166,6 +1166,62 @@ class Bridge:
         self._apply_config(load_editor_config(self.config.root))
         return self.get_settings()
 
+    # ---- Section wizard (DataDef read / edit / create / scan) ----
+    def get_datadef(self, name: str) -> dict:
+        from retrotool.script.project_admin import read_datadef
+        return read_datadef(self.config.root, name)
+
+    def preview_datadef(self, name: str, changes: dict) -> dict:
+        from retrotool.script.project_admin import ProjectAdminError, diff_datadef
+        try:
+            return {"diff": diff_datadef(self.config.root, name, changes or {}),
+                    "error": None}
+        except ProjectAdminError as e:
+            return {"diff": None, "error": str(e)}
+
+    def save_datadef(self, name: str, changes: dict) -> dict:
+        """Write a DataDef change set (comment-preserving, .bak'd), then
+        validate + hot-reload like save_project."""
+        from retrotool.script.project_admin import (
+            ProjectAdminError, update_datadef, validate_project,
+        )
+        try:
+            bak = update_datadef(self.config.root, name, changes or {})
+        except ProjectAdminError as e:
+            return {"ok": False, "problems": [], "backup": "", "error": str(e)}
+        problems = validate_project(self.config.root)
+        try:
+            self.reload_project()
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"reload: {e}")
+        return {"ok": True, "problems": problems, "backup": str(bak),
+                "error": None}
+
+    def create_section(self, spec: dict) -> dict:
+        """Create a new DataDef from the wizard spec, validate, hot-reload.
+        Returns {ok, path, problems, error}."""
+        from retrotool.script.project_admin import (
+            ProjectAdminError, create_datadef, validate_project,
+        )
+        try:
+            path = create_datadef(self.config.root, spec or {})
+        except ProjectAdminError as e:
+            return {"ok": False, "path": "", "problems": [], "error": str(e)}
+        problems = validate_project(self.config.root)
+        try:
+            self.reload_project()
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"reload: {e}")
+        return {"ok": True,
+                "path": str(path.relative_to(self.config.root)),
+                "problems": problems, "error": None}
+
+    def scan_pointers(self, entry_size: int = 2, min_entries: int = 8) -> dict:
+        """Scan the source ROM for candidate pointer tables (wizard seed)."""
+        from retrotool.script.project_admin import scan_sections
+        return scan_sections(self.config.root, entry_size=entry_size,
+                             min_entries=min_entries)
+
     # ---- cross-scenario find / find-and-replace ----
     def search_text(
         self,
@@ -1613,10 +1669,16 @@ textarea.overflow, textarea.overflow:focus {
                    <th>placement</th><th>defined in</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div style="color:var(--fg2);font-size:10px;margin-top:4px;">
-        Sections are defined by DataDef tomls (data_dirs) and
-        [[rom.build.sections]] — edit those files directly for now; an
-        add/edit wizard is planned.
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+        <button onclick="openSectionWizard()"
+                style="background:var(--bg3);color:var(--fg);border:1px solid var(--brd);
+                       border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">
+          ➕ Add section…
+        </button>
+        <span style="color:var(--fg2);font-size:10px;">
+          DataDef-backed rows are clickable to edit; inline
+          [[rom.build.sections]] entries are edited in project.toml.
+        </span>
       </div>
 
       <div class="pj-diff" id="pj-diff"></div>
@@ -1625,6 +1687,70 @@ textarea.overflow, textarea.overflow:focus {
         <button id="pj-review" class="primary" onclick="reviewProject()">Review changes…</button>
         <button id="pj-apply" class="primary" style="display:none"
                 onclick="applyProject()">Apply &amp; reload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section editor / add-section wizard -->
+  <div class="modal-bg" id="section-modal">
+    <div class="modal wide">
+      <h3 id="sw-title">Section</h3>
+      <div class="pj-problems" id="sw-problems"></div>
+
+      <div id="sw-add-only">
+        <h4>Identity</h4>
+        <div class="pj-grid">
+          <label>Name</label><input id="sw-name" type="text" placeholder="menus">
+          <label>Kind</label>
+          <select id="sw-kind">
+            <option value="script">script</option>
+            <option value="fixed-records">fixed-records</option>
+          </select>
+        </div>
+        <h4>Scan ROM for pointer tables</h4>
+        <div class="pj-grid">
+          <label>Pointer width</label>
+          <select id="sw-scan-size"><option value="2">2 (16-bit)</option>
+                                    <option value="3">3 (24-bit)</option></select>
+          <label>Min entries</label><input id="sw-scan-min" type="number" value="8" min="2">
+        </div>
+        <div style="margin:6px 0;">
+          <button onclick="swScan()"
+                  style="background:var(--bg3);color:var(--fg);border:1px solid var(--brd);
+                         border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">
+            🔎 Scan
+          </button>
+          <span id="sw-scan-note" style="color:var(--fg2);font-size:10px;"></span>
+        </div>
+        <div id="sw-candidates" style="max-height:140px;overflow-y:auto;"></div>
+      </div>
+
+      <h4>Encoding</h4>
+      <div class="pj-grid">
+        <label>Table (.tbl)</label><input id="sw-table" type="text"
+               placeholder="tables/game_en.tbl">
+        <label>Terminator</label><input id="sw-terminator" type="text" placeholder="FF">
+      </div>
+
+      <h4>Pointers &amp; data (PC file offsets, $hex)</h4>
+      <div class="pj-grid">
+        <label>Ptr table offset</label><input id="sw-ptr-offset" type="text" placeholder="$004000">
+        <label>Entry count</label><input id="sw-ptr-count" type="number" min="1">
+        <label>Pointer size</label>
+        <select id="sw-ptr-size"><option value="2">2</option><option value="3">3</option></select>
+        <label>Placement</label>
+        <select id="sw-placement"><option value="relocate">relocate</option>
+                                  <option value="overflow">overflow</option></select>
+        <label>Data offset</label><input id="sw-data-offset" type="text" placeholder="$004040">
+        <label>Data end</label><input id="sw-data-end" type="text" placeholder="$004080">
+      </div>
+
+      <div class="pj-diff" id="sw-diff"></div>
+      <div class="actions">
+        <button onclick="closeSectionModal()">Cancel</button>
+        <button id="sw-review" class="primary" onclick="swReview()">Review changes…</button>
+        <button id="sw-apply" class="primary" style="display:none"
+                onclick="swApply()">Apply &amp; reload</button>
       </div>
     </div>
   </div>
@@ -2110,12 +2236,17 @@ async function openProject() {
   (p.sections || []).forEach(s => {
     const tr = document.createElement('tr');
     [s.name, s.kind, s.file, s.count == null ? '' : s.count,
-     s.placement, s.from_datadef ? `defs/${s.from_datadef}.toml` : (s.source || '')]
+     s.placement, s.from_datadef ? '(DataDef — click to edit)' : (s.source || '')]
       .forEach(v => {
         const td = document.createElement('td');
         td.textContent = v == null ? '' : String(v);
         tr.appendChild(td);
       });
+    if (s.from_datadef) {
+      tr.style.cursor = 'pointer';
+      tr.title = 'Edit this section\'s DataDef';
+      tr.onclick = () => openSectionEditor(s.from_datadef);
+    }
     tbody.appendChild(tr);
   });
 
@@ -2174,6 +2305,217 @@ async function applyProject() {
   closeProject();
   // Config hot-reloaded bridge-side — refresh everything visible.
   await loadScenarios();
+}
+
+// ---- Section editor / add-section wizard ----
+// SW_MODE: {mode:'edit', name, baseline} or {mode:'add'}
+let SW_MODE = null;
+let SW_PENDING = null;
+
+function swShowProblems(problems) {
+  const el = document.getElementById('sw-problems');
+  el.classList.toggle('on', !!(problems && problems.length));
+  el.textContent = (problems || []).map(p => '✗ ' + p).join('\n');
+}
+function swReset() {
+  SW_PENDING = null;
+  document.getElementById('sw-diff').classList.remove('on');
+  document.getElementById('sw-apply').style.display = 'none';
+  document.getElementById('sw-review').style.display = '';
+  document.getElementById('sw-candidates').innerHTML = '';
+  document.getElementById('sw-scan-note').textContent = '';
+}
+function closeSectionModal() {
+  document.getElementById('section-modal').classList.remove('open');
+}
+
+// Hex helpers: display $XXXXXX, parse "$"/"0x" hex or bare decimal.
+function swHex(v) {
+  return v == null || v === '' ? ''
+       : '$' + Number(v).toString(16).toUpperCase().padStart(6, '0');
+}
+function swParseOffset(s) {
+  s = (s || '').trim();
+  if (!s) return null;
+  if (s.startsWith('$')) return parseInt(s.slice(1).replace(/:/g, ''), 16);
+  if (s.toLowerCase().startsWith('0x')) return parseInt(s, 16);
+  return parseInt(s, 10);
+}
+
+async function openSectionEditor(name) {
+  const d = await pywebview.api.get_datadef(name);
+  swReset();
+  swShowProblems(d.problems);
+  SW_MODE = { mode: 'edit', name: name, baseline: {} };
+  document.getElementById('sw-title').textContent =
+    `Edit section "${name}"  (${d.path})`;
+  document.getElementById('sw-add-only').style.display = 'none';
+
+  const ptr = d.pointers || {}, enc = d.encoding || {}, dat = d.data || {};
+  const place = ((d.section || {}).placement || {});
+  const vals = {
+    'sw-table': enc.table_file || '',
+    'sw-terminator': enc.terminator != null
+        ? Number(enc.terminator).toString(16).toUpperCase().padStart(2, '0') : '',
+    'sw-ptr-offset': ptr.offset != null ? String(ptr.offset) : '',
+    'sw-ptr-count': ptr.count != null ? String(ptr.count) : '',
+    'sw-ptr-size': ptr.size != null ? String(ptr.size) : '2',
+    'sw-placement': place.mode || 'relocate',
+    'sw-data-offset': dat.offset != null ? String(dat.offset) : '',
+    'sw-data-end': dat.end != null ? String(dat.end) : '',
+  };
+  SW_MODE.baseline = vals;
+  for (const id in vals) document.getElementById(id).value = vals[id];
+  document.getElementById('section-modal').classList.add('open');
+}
+
+function openSectionWizard() {
+  swReset();
+  swShowProblems([]);
+  SW_MODE = { mode: 'add' };
+  document.getElementById('sw-title').textContent = 'Add section';
+  document.getElementById('sw-add-only').style.display = '';
+  // Prefill the table path from the project's first section (same game,
+  // same encoding table is the common case).
+  const firstTable = (PJ_BASELINE && PJ_BASELINE['pj-table']) || '';
+  ['sw-name', 'sw-ptr-offset', 'sw-ptr-count', 'sw-data-offset',
+   'sw-data-end'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('sw-table').value = firstTable;
+  document.getElementById('sw-terminator').value = 'FF';
+  document.getElementById('sw-ptr-size').value = '2';
+  document.getElementById('sw-placement').value = 'relocate';
+  document.getElementById('section-modal').classList.add('open');
+}
+
+async function swScan() {
+  const size = parseInt(document.getElementById('sw-scan-size').value, 10);
+  const minE = parseInt(document.getElementById('sw-scan-min').value, 10) || 8;
+  document.getElementById('sw-scan-note').textContent = 'scanning…';
+  const r = await pywebview.api.scan_pointers(size, minE);
+  if (r.error) {
+    document.getElementById('sw-scan-note').textContent = '';
+    swShowProblems([r.error]);
+    return;
+  }
+  document.getElementById('sw-scan-note').textContent =
+    `${r.candidates.length} candidate(s)` + (r.truncated ? ' (truncated)' : '')
+    + ' — click one to adopt';
+  const host = document.getElementById('sw-candidates');
+  host.innerHTML = '';
+  const tbl = document.createElement('table');
+  tbl.className = 'pj-sections';
+  tbl.innerHTML = '<thead><tr><th>offset</th><th>entries</th><th>targets</th>'
+                + '<th>monotonic</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  r.candidates.forEach(c => {
+    const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    [c.offset_hex, c.count, `${c.target_low_hex}–${c.target_high_hex}`,
+     Math.round(c.monotonic * 100) + '%'].forEach(v => {
+      const td = document.createElement('td');
+      td.textContent = String(v);
+      tr.appendChild(td);
+    });
+    tr.onclick = () => {
+      document.getElementById('sw-ptr-offset').value = c.offset_hex;
+      document.getElementById('sw-ptr-count').value = String(c.count);
+      document.getElementById('sw-ptr-size').value = String(c.entry_size);
+      document.getElementById('sw-data-offset').value = c.target_low_hex;
+      document.getElementById('sw-data-end').value = swHex(c.target_high + 1);
+      tb.querySelectorAll('tr').forEach(x => x.style.background = '');
+      tr.style.background = 'var(--bg3)';
+    };
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);
+  host.appendChild(tbl);
+}
+
+function swCollectEditChanges() {
+  // dotted DataDef keys for values that differ from the loaded baseline.
+  const map = {
+    'sw-table': ['encoding.table_file', 'str'],
+    'sw-terminator': ['encoding.terminator', 'hexbyte'],
+    'sw-ptr-offset': ['pointers.offset', 'str'],
+    'sw-ptr-count': ['pointers.count', 'int'],
+    'sw-ptr-size': ['pointers.size', 'int'],
+    'sw-placement': ['section.placement.mode', 'str'],
+    'sw-data-offset': ['data.offset', 'str'],
+    'sw-data-end': ['data.end', 'str'],
+  };
+  const changes = {};
+  for (const id in map) {
+    const [key, kind] = map[id];
+    const now = document.getElementById(id).value.trim();
+    if (now === SW_MODE.baseline[id]) continue;
+    if (now === '') { changes[key] = null; continue; }
+    if (kind === 'int') changes[key] = parseInt(now, 10);
+    else if (kind === 'hexbyte') changes[key] = parseInt(now, 16);
+    else changes[key] = now;
+  }
+  return changes;
+}
+
+function swCollectAddSpec() {
+  const term = document.getElementById('sw-terminator').value.trim();
+  return {
+    name: document.getElementById('sw-name').value.trim(),
+    kind: document.getElementById('sw-kind').value,
+    table_file: document.getElementById('sw-table').value.trim() || null,
+    terminator: term ? parseInt(term, 16) : null,
+    ptr_offset: swParseOffset(document.getElementById('sw-ptr-offset').value),
+    ptr_count: parseInt(document.getElementById('sw-ptr-count').value, 10) || null,
+    ptr_size: parseInt(document.getElementById('sw-ptr-size').value, 10),
+    data_offset: swParseOffset(document.getElementById('sw-data-offset').value),
+    data_end: swParseOffset(document.getElementById('sw-data-end').value),
+    placement_mode: document.getElementById('sw-placement').value,
+  };
+}
+
+async function swReview() {
+  const diffEl = document.getElementById('sw-diff');
+  if (SW_MODE.mode === 'edit') {
+    const changes = swCollectEditChanges();
+    if (!Object.keys(changes).length) {
+      diffEl.textContent = '(no changes)';
+      diffEl.classList.add('on');
+      return;
+    }
+    const r = await pywebview.api.preview_datadef(SW_MODE.name, changes);
+    if (r.error) { swShowProblems([r.error]); return; }
+    diffEl.innerHTML = '';
+    (r.diff || '(no textual change)').split('\n').forEach(line => {
+      const div = document.createElement('div');
+      div.textContent = line;
+      if (line.startsWith('+') && !line.startsWith('+++')) div.className = 'add';
+      if (line.startsWith('-') && !line.startsWith('---')) div.className = 'del';
+      diffEl.appendChild(div);
+    });
+    SW_PENDING = changes;
+  } else {
+    const spec = swCollectAddSpec();
+    if (!spec.name) { swShowProblems(['section name is required']); return; }
+    diffEl.textContent =
+      `Will create a new DataDef for "${spec.name}" (kind=${spec.kind}, `
+      + `ptr table ${swHex(spec.ptr_offset)} × ${spec.ptr_count || '?'} `
+      + `entries, size ${spec.ptr_size}, placement ${spec.placement_mode}).`;
+    SW_PENDING = spec;
+  }
+  diffEl.classList.add('on');
+  document.getElementById('sw-review').style.display = 'none';
+  document.getElementById('sw-apply').style.display = '';
+}
+
+async function swApply() {
+  if (!SW_PENDING) return;
+  const r = (SW_MODE.mode === 'edit')
+    ? await pywebview.api.save_datadef(SW_MODE.name, SW_PENDING)
+    : await pywebview.api.create_section(SW_PENDING);
+  if (!r.ok) { swShowProblems([r.error || 'failed']); return; }
+  swShowProblems(r.problems);
+  closeSectionModal();
+  await openProject();        // refresh the section table + problems
+  await loadScenarios();      // config was hot-reloaded bridge-side
 }
 
 // ---- Settings modal ----

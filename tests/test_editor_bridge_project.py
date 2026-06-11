@@ -76,3 +76,38 @@ def test_reload_project_flushes_pending_saves(bridge: Bridge):
     bridge.queue_save("dialog", 0, "Changed![FF]")
     bridge.reload_project()
     assert bridge.scenarios["dialog"].entries[0]["body"] == "Changed![FF]"
+
+
+# ---------------------------------------------------------------------------
+# Section wizard via the bridge
+# ---------------------------------------------------------------------------
+
+def test_wizard_scan_edit_create_roundtrip(bridge: Bridge):
+    # Scan seeds the wizard with the demo table.
+    r = bridge.scan_pointers(entry_size=2, min_entries=3)
+    assert r["error"] is None
+    assert any(c["offset"] == 0x4000 for c in r["candidates"])
+
+    # Edit the existing DataDef through the panel path.
+    d = bridge.get_datadef("dialog")
+    assert d["path"] == "defs/dialog.toml"
+    pv = bridge.preview_datadef("dialog", {"section.placement.mode": "overflow"})
+    assert '+mode = "overflow"' in pv["diff"]
+    res = bridge.save_datadef("dialog", {"pointers.count": 3})  # no-op value
+    assert res["ok"] and res["problems"] == []
+
+    # Create a second section; the hot-reloaded project lists both.
+    res = bridge.create_section({
+        "name": "menus", "table_file": "tables/game_en.tbl",
+        "terminator": 0xFF, "ptr_offset": 0x4100, "ptr_count": 2,
+        "ptr_size": 2,
+    })
+    assert res["ok"], res
+    assert res["path"] == "defs/menus.toml"
+    names = {s["name"] for s in bridge.get_project()["sections"]}
+    assert names == {"dialog", "menus"}
+
+
+def test_wizard_create_duplicate_fails_cleanly(bridge: Bridge):
+    res = bridge.create_section({"name": "dialog"})
+    assert not res["ok"] and "already exists" in res["error"]
