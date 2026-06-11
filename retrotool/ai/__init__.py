@@ -3,6 +3,10 @@
 This package does NOT call any LLM. It is a vocabulary — `str.format`-style prompt
 templates plus structured plan/workflow dataclasses — for downstream scripts that wire
 their own model client. See README §retrotool.ai for the intended usage pattern.
+
+Status: EXPERIMENTAL — shapes proven against one game's tooling, minimal test
+coverage, APIs may change in any release. See README §Where this is going for
+the expansion plan.
 """
 from retrotool.ai.context import ProjectContext, build_context
 from retrotool.ai.ipc_prompt import IpcPlan, IpcStep, find_text_render_routine

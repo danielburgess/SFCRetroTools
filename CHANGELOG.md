@@ -32,6 +32,20 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### `extraction` / `export` / `ai` marked experimental, with growth plans
+
+The three skeleton subsystems are now explicitly **experimental** — banner
+in each module docstring and README section: minimal test coverage, APIs
+may change in any release, pin retrotool if you build on them. The README
+"Where this is going" section gains an "Experimental subsystems" roadmap
+spelling out what each grows into and its graduation bar: `extraction` →
+per-game asset-extraction recipes feeding the workbench's asset browser
+(bar: two games through one recipe schema, round-trip tested); `export` →
+extraction-to-openable Godot/Tiled projects with import-back for editable
+formats (bar: Tiled round-trip on a real game); `ai` → debugger-verified
+assisted reverse engineering, still zero-model-calls (bar: one documented
+end-to-end agent session on public APIs).
+
 ### Attr parsing centralized (grow / pointer-size / boolean attrs)
 
 Enum-like section attrs are now validated ONCE, at `Section` construction

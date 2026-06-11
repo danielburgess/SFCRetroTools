@@ -699,6 +699,10 @@ Assembly patching + codegen.
   templates for common patterns.
 
 ### `retrotool.extraction`
+> ⚠️ **Experimental** — dataclass shapes proven against one game's tooling, minimal
+> test coverage; APIs may change in any release. Expansion plan under
+> [Where this is going](#where-this-is-going).
+
 Dataclass models for the things a disassembly typically produces. Pipeline is a
 dependency-ordered runner so extraction can be staged.
 
@@ -708,6 +712,10 @@ dependency-ordered runner so extraction can be staged.
 - `Pipeline` / `PipelineStage` — topologically-ordered runner over a shared context dict.
 
 ### `retrotool.export`
+> ⚠️ **Experimental** — emitters generate valid output but have minimal test coverage
+> and no round-trip guarantees yet; APIs may change in any release. Expansion plan
+> under [Where this is going](#where-this-is-going).
+
 Text emitters for common downstream formats. Pure stdlib — no Godot/Tiled install required.
 
 - `export.godot.GdScene` / `GdResource` — `.tscn` / `.tres` text generator with Godot's
@@ -722,6 +730,10 @@ Text emitters for common downstream formats. Pure stdlib — no Godot/Tiled inst
 - `export.python.render_module` — `@dataclass` module.
 
 ### `retrotool.ai`
+> ⚠️ **Experimental** — a prompt/workflow vocabulary that has not yet been exercised by a
+> shipped agent; templates and dataclass shapes may change in any release. Expansion plan
+> under [Where this is going](#where-this-is-going).
+
 Prompt templates and dataclass shapes for **external** LLM-driven scripts. **No model calls
 are made from this package** — it is a vocabulary, not a client. Designed so a downstream
 script can do:
@@ -911,6 +923,41 @@ Roughly in priority order:
    "which translations and hacks exist for the cart I just dumped?"
    becomes a one-click question. Federated, not centralized — the app
    is the consumer, not the authority.
+
+### Experimental subsystems → where they grow
+
+Three packages ship today as **experimental** (marked in their docstrings
+and module sections above): `retrotool.extraction`, `retrotool.export`,
+and `retrotool.ai`. They are intentionally early — vocabulary first,
+implementation second — because each is the seed of a roadmap item:
+
+- **`extraction` → the workbench's structured-asset layer.** Today:
+  dataclass models (Level / EntityDef / Behavior) plus a staged pipeline
+  runner. Planned: per-game *extraction recipes* — declarative DataDef-style
+  configs that populate those models straight from a ROM (levels, entity
+  tables, behavior state machines), so the workbench (item 1) gets an asset
+  browser instead of a hex view. Graduation bar: two games' levels
+  extracting through the same recipe schema, with round-trip tests.
+- **`export` → the modding bridge.** Today: text emitters for Godot
+  scenes/tilesets, Tiled TMX/TSX, C++ headers, Python dataclasses.
+  Planned: one command from an extraction pipeline to an *openable*
+  Godot/Tiled project (ports, remake prototyping, viewing levels in a real
+  editor), then **import back** for the formats where it makes sense —
+  Tiled-edited levels re-encoded into the ROM, the way the script editor
+  already round-trips text. Graduation bar: extraction → Tiled → edit →
+  rebuild round-trip on one real game.
+- **`ai` → assisted reverse engineering.** Today: zero-client prompt
+  templates and workflow shapes (identify compression, locate text tables,
+  discover level formats, suggest asar hooks). Planned: keep the
+  no-model-calls contract, but pair the vocabulary with the Mesen2 debugger
+  IPC (`ipc_prompt.IpcPlan`) so an external agent can *verify* hypotheses
+  against a live emulator rather than just read bytes — and feed the script
+  editor's planned translation-assist pane. Graduation bar: one documented
+  end-to-end agent session (compression identified + verified on a real
+  ROM) using only public APIs.
+
+Until a subsystem graduates, treat its API as unstable: pin retrotool if
+you build on it, and expect breaking changes in minor releases.
 
 This is ambitious and intentionally scoped beyond 1.0. What *is* in scope
 now: keep the library stable, keep the CLI honest, keep the pipeline
