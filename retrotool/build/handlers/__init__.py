@@ -30,6 +30,7 @@ from retrotool.build.handlers._base import (  # noqa: F401
     HandlerFn,
     WriteRange,
     _PreparedScript,
+    _attr_bool,
     _attr_hex,
     _diff_ranges,
     _ensure_room,

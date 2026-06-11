@@ -47,7 +47,7 @@ class BuildStep:
     file: Optional[str] = None        # source input file (text / bin). Usually omitted —
                                       # resolver defaults to {project.en_data_dir}/{name}.txt.
                                       # Legacy alias for `en_file`.
-    grow: Optional[str] = None        # "insert" | "replace" | "fail"
+    grow: Optional[str] = None        # "replace" | "insert" (spec.VALID_GROW)
     codec: Optional[str] = None
     condition: Optional[str] = None   # `if=` expression
     offset: Optional[int] = None      # explicit anchor when DataDef has no pointers/data section

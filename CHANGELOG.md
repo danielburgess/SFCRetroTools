@@ -32,6 +32,24 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### Attr parsing centralized (grow / pointer-size / boolean attrs)
+
+Enum-like section attrs are now validated ONCE, at `Section` construction
+(`__post_init__`), covering every path — TOML/MBXML front-ends, DataDef
+resolution, direct `BuildSpec` assembly — instead of ad-hoc re-validation
+in some handlers and none in others. `grow = "fail"` is **rejected** with
+guidance: it was accepted-but-never-implemented and silently behaved as
+`replace` (which already fails when a write would extend the ROM).
+`pointer-size` outside {2, 3} now fails at parse time, not mid-build.
+
+Boolean string attrs (`allow-shrink`, `allow-truncate`, `strict`,
+`no-flip`, `palette-from-png`, `priority`) go through one `_attr_bool`
+helper — previously six copy-pastes with inconsistent accepted values
+("on" worked for graphics attrs but not assembler ones). Accepted values
+are now uniformly 1/true/yes/on and 0/false/no/off (case-insensitive),
+and an unrecognized value like `allow-shrink = "ture"` raises naming the
+key instead of silently meaning False.
+
 ### `retrotool.build.handlers` split into a package
 
 The 2,700-line `handlers.py` is now `handlers/` split by concern:

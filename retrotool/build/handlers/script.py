@@ -202,10 +202,7 @@ def handle_script(
         raise HandlerError(f"{section.source}: <script> requires count=")
 
     ptr_size = section.pointer_size or 2
-    if ptr_size not in (2, 3):
-        raise HandlerError(
-            f"{section.source}: pointer-size must be 2 or 3, got {ptr_size}"
-        )
+    # pointer_size validity is enforced at Section construction.
 
     if prepared is None:
         prepared = _script_prepare_relocate(

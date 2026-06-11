@@ -11,6 +11,7 @@ from retrotool.build.handlers._base import (
     BuildContext,
     HandlerError,
     WriteRange,
+    _attr_bool,
     _attr_hex,
     _load_callable,
     _read_concat,
@@ -58,10 +59,8 @@ def handle_bin(rom: bytearray, section: Section, root: Path, ctx: Optional[Build
             )
         data = data + b"\x00" * (section.size - len(data))
 
-    grow = (section.grow or "replace").lower()
-    if grow not in {"replace", "insert", "fail"}:
-        raise HandlerError(f"{section.source}: invalid grow={section.grow!r}")
-    allow_grow = grow == "insert"
+    # grow is validated once, at Section construction (spec.VALID_GROW).
+    allow_grow = (section.grow or "replace").lower() == "insert"
     return _write(rom, section.offset, data, allow_grow=allow_grow, source=section.source or "")
 
 
@@ -100,13 +99,15 @@ def _handle_graphics_png(rom: bytearray, section: Section, root: Path) -> WriteR
     bpp = _attr_hex(a.get("bpp")) or 4
     colors = _attr_hex(a.get("colors")) or (4 if bpp == 2 else 16)
     palettes = _attr_hex(a.get("palettes")) or 8
-    no_flip = (a.get("no-flip") or "").lower() in ("1", "true", "yes", "on")
+    no_flip = _attr_bool(a.get("no-flip"), key="no-flip",
+                         source=section.source or "")
     # palette-from-png: pack against the indexed PNG's OWN palette order so tile
     # pixel indices line up with a ROM's fixed CGRAM (SuperFamiconv would
     # otherwise re-sort colours). PLTE laid out as [shared idx0] + (colors-1)
     # colours per subpalette; `palettes` selects how many subpalettes to take.
     fixed_palette = None
-    if (a.get("palette-from-png") or "").lower() in ("1", "true", "yes", "on"):
+    if _attr_bool(a.get("palette-from-png"), key="palette-from-png",
+                  source=section.source or ""):
         fixed_palette = grouped_palette_bytes(
             png_palette_rgb(png), subpalettes=palettes, colors_per=colors)
     enc = encode_png(png, bpp=bpp, colors=colors, palettes=palettes,
@@ -162,7 +163,8 @@ def _handle_graphics_png(rom: bytearray, section: Section, root: Path) -> WriteR
             dest_cols=_attr_hex(a.get("map-cols")) or 32,
             dest_entries=_attr_hex(a.get("map-entries")) or 1024,
             palette_remap=palette_remap,
-            force_priority=(a.get("priority") or "").lower() in ("1", "true", "yes", "on"),
+            force_priority=_attr_bool(a.get("priority"), key="priority",
+                                      source=section.source or ""),
             skip_tiles=skip_tiles,
         )
         written.append(_write(rom, map_off, map_bytes, allow_grow=allow_grow,

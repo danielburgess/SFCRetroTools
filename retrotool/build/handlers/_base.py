@@ -164,6 +164,28 @@ def _attr_hex(v: Optional[str]) -> Optional[int]:
     return int(s, 10)
 
 
+_TRUTHY_ATTRS = frozenset(("1", "true", "yes", "on"))
+_FALSY_ATTRS = frozenset(("0", "false", "no", "off", ""))
+
+
+def _attr_bool(v: Optional[str], *, key: str, source: str = "") -> bool:
+    """Coerce a boolean section attr (single point of truth — this pattern
+    used to be copy-pasted across handlers with inconsistent accepted
+    values). None/"" → False. Unrecognized text raises: a typo like
+    `allow-shrink="ture"` must not silently mean False."""
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    if s in _TRUTHY_ATTRS:
+        return True
+    if s in _FALSY_ATTRS:
+        return False
+    raise HandlerError(
+        f"{source}: {key}={v!r} is not a boolean "
+        f"(use one of: 1/true/yes/on, 0/false/no/off)"
+    )
+
+
 def _load_callable(ref: str, root: Path, source: str = "") -> Callable:
     """Resolve a `path/to/mod.py:func` or `pkg.mod:func` reference to a callable.
     File-path refs are resolved relative to the project root and imported by
@@ -262,9 +284,9 @@ def _wrap_assembler_writes(
     (default — cache off) or per-byte-run diff ranges (cache opt-in).
     Mirrors the behavior `handle_asar` had as inline code; pulled out so
     `handle_bass` doesn't drift when the asar one gets tuned."""
-    allow_shrink = (section.attrs.get("allow-shrink") or "").lower() in (
-        "1", "true", "yes",
-    )
+    allow_shrink = _attr_bool(section.attrs.get("allow-shrink"),
+                              key="allow-shrink",
+                              source=section.source or "")
     if len(new_rom) < len(rom) and not allow_shrink:
         raise HandlerError(
             f"{section.source}: {label} shrank ROM from {len(rom)} to "

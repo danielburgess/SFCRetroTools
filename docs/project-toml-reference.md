@@ -105,7 +105,7 @@ is preserved in `section.attrs` for the handler (see per-kind tables below).
 | `offset` | int | — | PC write target. |
 | `size` | int | — | Byte length (bounds checks; extract read length). |
 | `codec` | str | — | Compression codec for `bin`: `lzss`, `lzss-rbshura`, `lzss-zamn`, `lzss-legacy`, `rle`, … (see `retrotool.compression.registry`). |
-| `grow` | str | `replace` | `replace` (overwrite in place), `insert` (allow the write to extend the ROM), `fail`. |
+| `grow` | str | `replace` | `replace` (overwrite in place; a write extending past the ROM end errors) or `insert` (allow the write to grow the ROM). `"fail"` is rejected — it was never implemented; `replace` already fails on growth. |
 | `count` | int | — | Entry count (script pointer tables, fixed-records). |
 | `stride` | int | — | Bytes per record (`fixed-records`). |
 | `pointer-table` | int | — | PC offset of the script pointer table. |

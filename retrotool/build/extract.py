@@ -228,10 +228,7 @@ def _extract_script_pointer_table(
     if section.count is None:
         raise HandlerError(f"{section.source}: <script pointer-table> requires count=")
     ptr_size = section.pointer_size or 2
-    if ptr_size not in (2, 3):
-        raise HandlerError(
-            f"{section.source}: pointer-size must be 2 or 3, got {ptr_size}"
-        )
+    # pointer_size validity is enforced at Section construction.
 
     # Address-mapping type: `section.address_type` is set by the driver
     # from `BuildSpec.address_type()`. Fall back to LOROM1 for callers

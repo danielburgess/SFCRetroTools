@@ -126,6 +126,31 @@ class Section:
     # (e.g. <lzr> → kind=BIN, original_kind=LZR). None for native-form sections.
     original_kind: Optional["SectionKind"] = None
 
+    def __post_init__(self):
+        # Single validation point for enum-like attrs — covers every
+        # construction path (TOML/MBXML front-ends, DataDef resolution,
+        # direct BuildSpec assembly) so handlers don't re-validate.
+        if self.grow is not None and self.grow not in VALID_GROW:
+            hint = (
+                ' — grow="fail" was never implemented; "replace" already '
+                "fails when a write would extend the ROM"
+                if self.grow == "fail" else ""
+            )
+            raise ValueError(
+                f"{self.source or self.kind.value}: invalid grow={self.grow!r}"
+                f" (expected one of: {', '.join(VALID_GROW)}){hint}"
+            )
+        if self.pointer_size is not None and self.pointer_size not in (2, 3):
+            raise ValueError(
+                f"{self.source or self.kind.value}: pointer-size must be 2 "
+                f"or 3, got {self.pointer_size}"
+            )
+
+
+# `grow=` values: "replace" overwrites in place (a write extending past the
+# ROM end raises); "insert" allows the write to grow the ROM.
+VALID_GROW = ("replace", "insert")
+
 
 @dataclass
 class BuildSpec:

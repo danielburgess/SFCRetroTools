@@ -7,6 +7,7 @@ from typing import Optional
 from retrotool.build.spec import Section
 
 from retrotool.build.handlers._base import (
+    _attr_bool,
     BuildContext,
     HandlerError,
     _parse_pipe_kvs,
@@ -93,7 +94,7 @@ def handle_ca65(rom: bytearray, section: Section, root: Path, ctx: Optional[Buil
                          (default 0x00); longer raises HandlerError unless
                          `allow-truncate="1"` is set.
       pad-byte=<int>     (optional) byte used for `length` padding.
-      grow=insert|replace|fail  (optional) `insert` grows the ROM if the
+      grow=insert|replace (optional) `insert` grows the ROM if the
                          write extends past the current end; `replace` is
                          the default and disallows growth.
       includes=A|B|C     (optional) `-I` paths fed to ca65 (.include / .import
@@ -204,9 +205,9 @@ def handle_ca65(rom: bytearray, section: Section, root: Path, ctx: Optional[Buil
             raise HandlerError(
                 f"{section.source}: <ca65> pad-byte= not int: {pad_byte_attr!r}"
             ) from e
-    allow_truncate = (raw.get("allow-truncate") or "").lower() in (
-        "1", "true", "yes",
-    )
+    allow_truncate = _attr_bool(raw.get("allow-truncate"),
+                                key="allow-truncate",
+                                source=section.source or "")
     grow = (section.grow or "replace").lower()
 
     # ca65/ld65 are bundled by `retrotool[libsfx]` (or the system binaries
@@ -331,7 +332,8 @@ def handle_bass(rom: bytearray, section: Section, root: Path, ctx: Optional[Buil
     constants = _parse_pipe_kvs(
         "bass constant", raw.get("constants") or "", section.source or "",
     )
-    strict = (raw.get("strict") or "").lower() in ("1", "true", "yes")
+    strict = _attr_bool(raw.get("strict"), key="strict",
+                        source=section.source or "")
     bass_cmd = (raw.get("bass-cmd") or "bass").strip() or "bass"
 
     before = bytes(rom)
