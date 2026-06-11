@@ -810,6 +810,22 @@ class Bridge:
     """
 
     def __init__(self, config: EditorConfig):
+        self._save_timer: Optional[threading.Timer] = None
+        self._save_lock = threading.Lock()
+        self._pending: dict[tuple[str, int], str] = {}
+        # Save state: "idle" → "queued" → "saving" → "saved" / "error".
+        # JS polls get_save_state() after queueing a save so the badge can
+        # remain in "saving" until Python has actually flushed to disk.
+        self._save_state = "idle"
+        self._save_error: Optional[str] = None
+        self._save_seq = 0  # monotonic; lets JS detect "this save completed"
+        self._apply_config(config, use_session_dirs=True)
+
+    def _apply_config(self, config: EditorConfig,
+                      use_session_dirs: bool = False) -> None:
+        """(Re)load everything derived from the project config: preview
+        assets, char tables, scenario lists. Called at startup and again by
+        reload_project() after the Project panel writes project.toml."""
         self.config = config
         self.assets = PreviewAssets(config.preview)
         reserved = config.control.reserved_bytes()
@@ -826,22 +842,17 @@ class Bridge:
         )
         self.scenarios: dict[str, Scenario] = {}
         self.ref_scenarios: dict[str, Scenario] = {}
-        self._save_timer: Optional[threading.Timer] = None
-        self._save_lock = threading.Lock()
-        self._pending: dict[tuple[str, int], str] = {}
-        # Save state: "idle" → "queued" → "saving" → "saved" / "error".
-        # JS polls get_save_state() after queueing a save so the badge can
-        # remain in "saving" until Python has actually flushed to disk.
-        self._save_state = "idle"
-        self._save_error: Optional[str] = None
-        self._save_seq = 0  # monotonic; lets JS detect "this save completed"
-        # Folder overrides from session state (config defaults if missing).
-        st = self.load_session_state()
-        self.data_dir = Path(st.get("editable_dir") or st.get("en_dir")
-                             or str(config.data_dir))
-        ref_default = config.reference_dir
-        ref_saved = st.get("reference_dir") or st.get("jp_dir")
-        self.reference_dir = Path(ref_saved) if ref_saved else ref_default
+        self.data_dir = config.data_dir
+        self.reference_dir = config.reference_dir
+        if use_session_dirs:
+            # Folder overrides from session state (config defaults if missing).
+            st = self.load_session_state()
+            saved = st.get("editable_dir") or st.get("en_dir")
+            if saved:
+                self.data_dir = Path(saved)
+            ref_saved = st.get("reference_dir") or st.get("jp_dir")
+            if ref_saved:
+                self.reference_dir = Path(ref_saved)
         self._reload_scenarios()
 
     def _reload_scenarios(self) -> None:
@@ -1107,6 +1118,54 @@ class Bridge:
         self._reload_scenarios()
         return self.get_settings()
 
+    # ---- Project panel (read / preview / save project.toml) ----
+    def get_project(self) -> dict:
+        """Merged project view for the Project panel — see
+        :mod:`retrotool.script.project_admin`."""
+        from retrotool.script.project_admin import read_project
+        return read_project(self.config.root)
+
+    def preview_project_changes(self, changes: dict) -> dict:
+        """Unified diff of what save_project(changes) would write, without
+        writing. ``{diff: str|None, error: str|None}``."""
+        from retrotool.script.project_admin import ProjectAdminError, diff_preview
+        try:
+            return {"diff": diff_preview(self.config.root, changes or {}),
+                    "error": None}
+        except ProjectAdminError as e:
+            return {"diff": None, "error": str(e)}
+
+    def save_project(self, changes: dict) -> dict:
+        """Apply the change set to project.toml (comment-preserving, with a
+        .bak) and hot-reload the editor config so the change takes effect
+        immediately (tables, preview geometry, control codes, file lists).
+
+        Returns ``{ok, problems, backup, error}`` — `problems` are the real
+        parsers' complaints about the saved state (the save itself only
+        fails on unparseable results, which never reach disk)."""
+        from retrotool.script.project_admin import (
+            ProjectAdminError, update_project, validate_project,
+        )
+        try:
+            bak = update_project(self.config.root, changes or {})
+        except ProjectAdminError as e:
+            return {"ok": False, "problems": [], "backup": "", "error": str(e)}
+        problems = validate_project(self.config.root)
+        try:
+            self.reload_project()
+        except Exception as e:  # noqa: BLE001 — surface, don't crash the UI
+            problems.append(f"reload: {e}")
+        return {"ok": True, "problems": problems, "backup": str(bak),
+                "error": None}
+
+    def reload_project(self) -> dict:
+        """Re-read project.toml into a fresh EditorConfig and re-derive all
+        editor state. Flushes pending text saves first so nothing queued is
+        lost across the swap. Returns the new settings dict."""
+        self.flush_now()
+        self._apply_config(load_editor_config(self.config.root))
+        return self.get_settings()
+
     # ---- cross-scenario find / find-and-replace ----
     def search_text(
         self,
@@ -1343,6 +1402,31 @@ textarea.overflow, textarea.overflow:focus {
 .modal-bg.open { display: flex; }
 .modal { background: var(--bg2); border: 1px solid var(--brd); border-radius: 6px;
          padding: 18px; min-width: 460px; max-width: 600px; }
+.modal.wide { min-width: 680px; max-width: 860px; max-height: 86vh; overflow-y: auto; }
+.modal h4 { color: var(--fg2); font-size: 11px; text-transform: uppercase;
+            letter-spacing: 1px; margin: 14px 0 6px; border-bottom: 1px solid var(--brd);
+            padding-bottom: 3px; }
+.pj-grid { display: grid; grid-template-columns: 130px 1fr 130px 1fr; gap: 6px 10px;
+           align-items: center; }
+.pj-grid label { font-size: 11px; color: var(--fg2); text-align: right; }
+.pj-grid input, .pj-grid select { padding: 5px 8px; background: var(--bg); color: var(--fg);
+            border: 1px solid var(--brd); border-radius: 3px; font-family: var(--code);
+            font-size: 12px; outline: none; min-width: 0; }
+.pj-grid input:focus { border-color: var(--acc); }
+.pj-problems { display: none; background: rgba(233,69,96,.08); border: 1px solid var(--acc);
+               border-radius: 4px; padding: 8px 10px; font-size: 11px; color: var(--acc);
+               margin-bottom: 10px; white-space: pre-wrap; font-family: var(--code); }
+.pj-problems.on { display: block; }
+.pj-sections { width: 100%; border-collapse: collapse; font-size: 11px;
+               font-family: var(--code); }
+.pj-sections th { text-align: left; color: var(--fg2); font-weight: normal;
+                  border-bottom: 1px solid var(--brd); padding: 3px 6px; }
+.pj-sections td { padding: 3px 6px; border-bottom: 1px solid var(--brd); color: var(--fg); }
+.pj-diff { display: none; background: var(--bg); border: 1px solid var(--brd);
+           border-radius: 4px; padding: 8px; font-family: var(--code); font-size: 11px;
+           max-height: 200px; overflow: auto; white-space: pre; margin-top: 10px; }
+.pj-diff.on { display: block; }
+.pj-diff .add { color: var(--grn); } .pj-diff .del { color: var(--acc); }
 .modal h3 { color: var(--acc); font-size: 13px; margin-bottom: 12px; }
 .modal .row { margin-bottom: 10px; }
 .modal .row label { display: block; font-size: 11px; color: var(--fg2);
@@ -1393,6 +1477,11 @@ textarea.overflow, textarea.overflow:focus {
               style="background:var(--bg3);color:var(--fg);border:1px solid var(--brd);
                      border-radius:3px;padding:3px 9px;font-size:11px;cursor:pointer;">
         🔍 Find
+      </button>
+      <button onclick="openProject()" title="Project configuration (project.toml)"
+              style="background:var(--bg3);color:var(--fg);border:1px solid var(--brd);
+                     border-radius:3px;padding:3px 9px;font-size:11px;cursor:pointer;">
+        🛠 Project
       </button>
       <button onclick="openSettings()" title="Folder settings"
               style="background:var(--bg3);color:var(--fg);border:1px solid var(--brd);
@@ -1476,6 +1565,66 @@ textarea.overflow, textarea.overflow:focus {
       <div class="actions">
         <button onclick="closeSettings()">Cancel</button>
         <button class="primary" onclick="saveSettings()">Save &amp; reload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project panel (project.toml configuration) -->
+  <div class="modal-bg" id="project-modal">
+    <div class="modal wide">
+      <h3>Project configuration <span id="pj-root" style="color:var(--fg2);font-size:10px;font-family:var(--code);"></span></h3>
+      <div class="pj-problems" id="pj-problems"></div>
+
+      <h4>General</h4>
+      <div class="pj-grid">
+        <label>ROM name</label><input id="pj-rom-name" type="text">
+        <label>Mapping</label>
+        <select id="pj-mapping">
+          <option value="lorom">lorom</option><option value="lorom1">lorom1</option>
+          <option value="lorom2">lorom2</option><option value="hirom">hirom</option>
+          <option value="exlorom">exlorom</option><option value="exhirom">exhirom</option>
+          <option value="sa1">sa1</option>
+        </select>
+        <label>Build language</label><select id="pj-build-lang"></select>
+        <label>Output dir</label><input id="pj-output-dir" type="text" placeholder="out">
+      </div>
+
+      <h4>Editor</h4>
+      <div class="pj-grid">
+        <label>Cols per line</label><input id="pj-cols" type="number" min="1" placeholder="24">
+        <label>Table (.tbl)</label><input id="pj-table" type="text"
+               placeholder="auto: tables/*_${lang}.tbl">
+        <label>Preview font</label><input id="pj-font" type="text"
+               placeholder="fonts/font.bin (empty = text-only)">
+        <label></label><span></span>
+      </div>
+
+      <h4>Control codes (hex bytes; empty = default)</h4>
+      <div class="pj-grid">
+        <label>Newline</label><input id="pj-cc-newline" type="text" placeholder="FD">
+        <label>Page break</label><input id="pj-cc-pagebreak" type="text" placeholder="FE">
+        <label>Terminator</label><input id="pj-cc-terminator" type="text" placeholder="FF">
+        <label>Palette code</label><input id="pj-cc-palette" type="text" placeholder="F9">
+      </div>
+
+      <h4>Script sections</h4>
+      <table class="pj-sections" id="pj-sections">
+        <thead><tr><th>name</th><th>kind</th><th>file</th><th>count</th>
+                   <th>placement</th><th>defined in</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div style="color:var(--fg2);font-size:10px;margin-top:4px;">
+        Sections are defined by DataDef tomls (data_dirs) and
+        [[rom.build.sections]] — edit those files directly for now; an
+        add/edit wizard is planned.
+      </div>
+
+      <div class="pj-diff" id="pj-diff"></div>
+      <div class="actions">
+        <button onclick="closeProject()">Cancel</button>
+        <button id="pj-review" class="primary" onclick="reviewProject()">Review changes…</button>
+        <button id="pj-apply" class="primary" style="display:none"
+                onclick="applyProject()">Apply &amp; reload</button>
       </div>
     </div>
   </div>
@@ -1895,6 +2044,137 @@ document.addEventListener('keydown', e => {
     else document.getElementById('find-q').focus();
   }
 });
+
+// ---- Project panel ----
+// Baseline of the loaded form values; only keys whose value CHANGED are
+// sent to the bridge, as {dotted.toml.key: value} (null deletes the key).
+let PJ_BASELINE = {};
+let PJ_PENDING = null;   // change set awaiting Apply after Review
+
+// field id -> [dotted key, kind]; kind: "str" ("" -> delete), "int",
+// "req" (string, sent even when emptied so validation complains loudly).
+const PJ_FIELDS = {
+  'pj-rom-name':      ['rom.name', 'req'],
+  'pj-mapping':       ['rom.mapping', 'req'],
+  'pj-build-lang':    ['build_lang', 'req'],
+  'pj-output-dir':    ['rom.build.output_dir', 'str'],
+  'pj-cols':          ['editor.cols_per_line', 'int'],
+  'pj-table':         ['editor.table', 'str'],
+  'pj-font':          ['editor.preview.font', 'str'],
+  'pj-cc-newline':    ['editor.control_codes.newline', 'str'],
+  'pj-cc-pagebreak':  ['editor.control_codes.page_break', 'str'],
+  'pj-cc-terminator': ['editor.control_codes.terminator', 'str'],
+  'pj-cc-palette':    ['editor.control_codes.palette_code', 'str'],
+};
+
+function pjShowProblems(problems) {
+  const el = document.getElementById('pj-problems');
+  el.classList.toggle('on', !!(problems && problems.length));
+  el.textContent = (problems || []).map(p => '✗ ' + p).join('\n');
+}
+
+async function openProject() {
+  const p = await pywebview.api.get_project();
+  document.getElementById('pj-root').textContent = p.root;
+  pjShowProblems(p.problems);
+
+  const langSel = document.getElementById('pj-build-lang');
+  langSel.innerHTML = '';
+  Object.keys(p.languages || {}).forEach(code => {
+    const o = document.createElement('option');
+    o.value = code; o.textContent = `${code}  (${p.languages[code]})`;
+    langSel.appendChild(o);
+  });
+
+  const ed = p.editor || {};
+  const cc = ed.control_codes || {};
+  const pv = ed.preview || {};
+  const vals = {
+    'pj-rom-name': p.rom.name || '',
+    'pj-mapping': p.rom.mapping || 'lorom',
+    'pj-build-lang': p.build_lang || '',
+    'pj-output-dir': p.build.output_dir || '',
+    'pj-cols': ed.cols_per_line != null ? String(ed.cols_per_line) : '',
+    'pj-table': ed.table || '',
+    'pj-font': pv.font || '',
+    'pj-cc-newline': cc.newline != null ? String(cc.newline) : '',
+    'pj-cc-pagebreak': cc.page_break != null ? String(cc.page_break) : '',
+    'pj-cc-terminator': cc.terminator != null ? String(cc.terminator) : '',
+    'pj-cc-palette': cc.palette_code != null ? String(cc.palette_code) : '',
+  };
+  PJ_BASELINE = vals;
+  for (const id in vals) document.getElementById(id).value = vals[id];
+
+  const tbody = document.querySelector('#pj-sections tbody');
+  tbody.innerHTML = '';
+  (p.sections || []).forEach(s => {
+    const tr = document.createElement('tr');
+    [s.name, s.kind, s.file, s.count == null ? '' : s.count,
+     s.placement, s.from_datadef ? `defs/${s.from_datadef}.toml` : (s.source || '')]
+      .forEach(v => {
+        const td = document.createElement('td');
+        td.textContent = v == null ? '' : String(v);
+        tr.appendChild(td);
+      });
+    tbody.appendChild(tr);
+  });
+
+  PJ_PENDING = null;
+  document.getElementById('pj-diff').classList.remove('on');
+  document.getElementById('pj-apply').style.display = 'none';
+  document.getElementById('pj-review').style.display = '';
+  document.getElementById('project-modal').classList.add('open');
+}
+function closeProject() {
+  document.getElementById('project-modal').classList.remove('open');
+}
+
+function pjCollectChanges() {
+  const changes = {};
+  for (const id in PJ_FIELDS) {
+    const [key, kind] = PJ_FIELDS[id];
+    const now = document.getElementById(id).value.trim();
+    if (now === PJ_BASELINE[id]) continue;
+    if (now === '' && kind !== 'req') changes[key] = null;        // delete
+    else if (kind === 'int') changes[key] = parseInt(now, 10);
+    else changes[key] = now;
+  }
+  return changes;
+}
+
+async function reviewProject() {
+  const changes = pjCollectChanges();
+  const diffEl = document.getElementById('pj-diff');
+  if (!Object.keys(changes).length) {
+    diffEl.textContent = '(no changes)';
+    diffEl.classList.add('on');
+    return;
+  }
+  const r = await pywebview.api.preview_project_changes(changes);
+  if (r.error) { pjShowProblems([r.error]); return; }
+  diffEl.innerHTML = '';
+  (r.diff || '(no textual change)').split('\n').forEach(line => {
+    const div = document.createElement('div');
+    div.textContent = line;
+    if (line.startsWith('+') && !line.startsWith('+++')) div.className = 'add';
+    if (line.startsWith('-') && !line.startsWith('---')) div.className = 'del';
+    diffEl.appendChild(div);
+  });
+  diffEl.classList.add('on');
+  PJ_PENDING = changes;
+  document.getElementById('pj-review').style.display = 'none';
+  document.getElementById('pj-apply').style.display = '';
+}
+
+async function applyProject() {
+  if (!PJ_PENDING) return;
+  const r = await pywebview.api.save_project(PJ_PENDING);
+  if (!r.ok) { pjShowProblems([r.error || 'save failed']); return; }
+  pjShowProblems(r.problems);
+  closeProject();
+  // Config hot-reloaded bridge-side — refresh everything visible.
+  await loadScenarios();
+}
 
 // ---- Settings modal ----
 function applyLabels(s) {

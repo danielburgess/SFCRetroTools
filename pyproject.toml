@@ -36,8 +36,9 @@ bass = ["retrotool-bass>=18.0"]
 # xdelta — binary delta patcher (Apache-2.0 binary bundled in the wheel).
 xdelta = ["retrotool-xdelta>=3.1.1"]
 # editor — `retrotool edit` GUI script editor (pywebview window + Pillow
-# for the pixel-accurate dialog preview).
-editor = ["pywebview>=5.0", "pillow>=10.0"]
+# for the pixel-accurate dialog preview + tomlkit for comment-preserving
+# project.toml writes from the Project panel).
+editor = ["pywebview>=5.0", "pillow>=10.0", "tomlkit>=0.12"]
 # all — every bundled-binary wheel at once.
 all = [
     "retrotool-libsfx>=2026.5.15",

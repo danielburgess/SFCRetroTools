@@ -32,6 +32,31 @@ fixes a re-run bug where `[rom] name` gained a double suffix
 (`mygame_fr_fr`). `retrotool lang list` shows declared languages and the
 active `build_lang`.
 
+### Script editor: Project panel (in-editor project.toml configuration)
+
+`retrotool edit` grows a 🛠 Project panel — the first piece of the
+project-manager direction. It shows a merged view of the project
+([rom] name/mapping, build_lang + language dirs, output dir, the
+`[editor]` knobs, control codes, and the resolved script-section list
+with each section's defining DataDef) and edits it safely:
+
+* changes are reviewed as a unified diff before anything is written;
+* writes go through **tomlkit** (comments/formatting preserved), behind
+  a timestamped `project.toml.bak`, and the result is parse-validated
+  BEFORE it replaces the original — a bad edit can never destroy a
+  working config;
+* validation problems come from the REAL parsers (build front-end +
+  editor config), so the panel says exactly what `retrotool build`
+  would say;
+* on save the editor hot-reloads its config in place — tables, preview
+  geometry, control codes, and overflow checking all reflect the new
+  values immediately (pending text edits are flushed first).
+
+Backed by the UI-agnostic `retrotool.script.project_admin` service
+(`read_project` / `update_project` / `diff_preview` /
+`validate_project`), reusable by future tooling. `tomlkit` joins the
+`editor` extra.
+
 ### `extraction` / `export` / `ai` marked experimental, with growth plans
 
 The three skeleton subsystems are now explicitly **experimental** — banner
